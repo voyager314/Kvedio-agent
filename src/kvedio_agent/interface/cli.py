@@ -19,7 +19,7 @@ from kvedio_agent.pipeline.jobs import StageScheduler, WorkUnit
 from kvedio_agent.pipeline.media import MediaProcessor, fingerprint
 from kvedio_agent.platform.config import Config
 from kvedio_agent.platform.costs import ProviderGate
-from kvedio_agent.platform.ingestion import LocalChunkIngestor
+from kvedio_agent.platform.ingestion import LocalChunkIngestor, UploadProgress
 from kvedio_agent.platform.providers import (
     LiteLLMChat,
     OpenAICompatibleASR,
@@ -230,6 +230,7 @@ def _evidence_context(
     service = AnalysisService(store, EvidenceIndex(store), _chat(settings, job_id))
     scratchpad.current_stage = "understand_segments"
     completed_ranges = set(scratchpad.completed_ranges)
+    milestone_ranges: list[tuple[int, int]] = []
     for segment in manifest["segments"]:
         start_ms = segment["start_ms"]
         end_ms = segment["end_ms"]
@@ -273,6 +274,18 @@ def _evidence_context(
             fact.uncertainty,
         )
         scratchpad.save(store, job_id)
+        milestone_ranges.append((start_ms, end_ms))
+        if len(milestone_ranges) == 5:
+            milestone_start = milestone_ranges[0][0]
+            milestone_end = milestone_ranges[-1][1]
+            milestone_summary = service.summarize_milestone(
+                job_id, milestone_start, milestone_end
+            )
+            console.print(Panel(
+                milestone_summary,
+                title=f"Key developments {milestone_start}..{milestone_end} ms",
+            ))
+            milestone_ranges.clear()
 
     scratchpad.current_stage = "synthesize_timeline"
     scratchpad.save(store, job_id)
@@ -543,7 +556,10 @@ def workbench_command() -> None:
             store, EvidenceIndex(store), _chat(settings, job_id)
         ).follow_up(job_id, selected, question)
 
-    run_workbench(store, follow_up)
+    def upload(video: Path) -> UploadProgress:
+        return LocalChunkIngestor(store).ingest(video)
+
+    run_workbench(store, follow_up, upload)
 
 
 @app.callback(invoke_without_command=True)

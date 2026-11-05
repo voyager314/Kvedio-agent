@@ -13,6 +13,7 @@ import httpx
 import litellm
 
 from kvedio_agent.platform.costs import ProviderGate, UsageReservation, call_key
+from kvedio_agent.platform.prompting import PromptRenderer
 from kvedio_agent.platform.settings import ModelEntry
 
 
@@ -273,9 +274,11 @@ class OpenAICompatibleVision:
     ) -> VisualObservation:
         """Send a bounded image set and normalize a textual visual observation."""
 
-        content: list[dict[str, Any]] = [
-            {"type": "text", "text": "Describe important visible events and on-screen text."}
-        ]
+        prompt_text = PromptRenderer().render(
+            "visual_observation",
+            frame_times_ms=", ".join(str(timestamp) for _, timestamp in frames),
+        )
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
         for frame, timestamp_ms in frames:
             mime = mimetypes.guess_type(frame.name)[0] or "image/jpeg"
             encoded = base64.b64encode(frame.read_bytes()).decode("ascii")
@@ -333,7 +336,10 @@ class OpenAICompatibleVision:
                 self.model,
             ),
             self.gate.estimate_vision(
-                "Describe important visible events and on-screen text.",
+                PromptRenderer().render(
+                    "visual_observation",
+                    frame_times_ms=", ".join(str(timestamp) for _, timestamp in frames),
+                ),
                 len(frames),
                 output_tokens=2048,
             ),

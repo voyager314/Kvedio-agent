@@ -12,6 +12,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
 
 from kvedio_agent.pipeline.analyze import AnalysisResult
+from kvedio_agent.platform.ingestion import UploadProgress
 from kvedio_agent.platform.storage import Store
 
 
@@ -68,10 +69,12 @@ class WorkbenchApp(App[None]):
     def __init__(
         self, store: Store,
         follow_up: Callable[[str, str], AnalysisResult] | None = None,
+        upload: Callable[[Path], UploadProgress] | None = None,
     ) -> None:
         super().__init__()
         self.store = store
         self.follow_up = follow_up
+        self.upload = upload
         self.selected_job_id: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -82,6 +85,7 @@ class WorkbenchApp(App[None]):
                 yield Static("Select a job", id="events")
                 yield Static("No evidence selected", id="evidence")
                 yield Static("No usage data", id="usage")
+        yield Input(placeholder="Upload MP4 path", id="upload")
         yield Input(placeholder="Ask a follow-up for the selected job", id="ask")
         yield Footer()
 
@@ -122,10 +126,35 @@ class WorkbenchApp(App[None]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Submit a follow-up in a worker and render its structured result."""
 
+        if event.input.id == "upload":
+            upload = self.upload
+            if event.value.strip() and upload is not None:
+                self._run_upload(Path(event.value.strip()), upload)
+            event.input.value = ""
+            return
         follow_up = self.follow_up
         if self.selected_job_id and event.value.strip() and follow_up is not None:
             self._run_follow_up(self.selected_job_id, event.value.strip(), follow_up)
         event.input.value = ""
+
+    @work(thread=True, exclusive=True)
+    def _run_upload(
+        self, source: Path, upload: Callable[[Path], UploadProgress]
+    ) -> None:
+        try:
+            result = upload(source)
+            message = (
+                f"Upload {result.upload_id}: {result.acknowledged_chunks}/"
+                f"{result.total_chunks} chunks"
+            )
+            if result.target_path:
+                message += f"\nStored video: {result.target_path}"
+            self.app.call_from_thread(self.query_one("#events", Static).update, message)
+        except Exception:
+            self.app.call_from_thread(
+                self.query_one("#events", Static).update,
+                "Upload failed; verify the MP4 path and resume ID.",
+            )
 
     @work(thread=True, exclusive=True)
     def _run_follow_up(
@@ -150,8 +179,10 @@ class WorkbenchApp(App[None]):
 
 
 def run_workbench(
-    store: Store, follow_up: Callable[[str, str], AnalysisResult]
+    store: Store,
+    follow_up: Callable[[str, str], AnalysisResult],
+    upload: Callable[[Path], UploadProgress],
 ) -> None:
     """Run the stateful workbench for the current local workspace."""
 
-    WorkbenchApp(store, follow_up).run()
+    WorkbenchApp(store, follow_up, upload).run()

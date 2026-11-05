@@ -232,6 +232,21 @@ class AnalysisService:
             ),
         )
 
+    def summarize_milestone(self, job_id: str, start_ms: int, end_ms: int) -> str:
+        """Summarize recent evidence at a key processing milestone with its source times."""
+
+        evidence = self.store.evidence_for_range(job_id, start_ms, end_ms)
+        if not evidence:
+            return "No evidence was produced for this interval."
+        prompt = self.prompts.render(
+            "milestone_summary", evidence=_format_evidence(evidence)
+        )
+        data = _parse_json(self._complete("milestone", prompt))
+        summary = data.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            raise ProviderError("analysis_invalid_response", retryable=False)
+        return summary.strip()
+
     def follow_up(
         self, job_id: str, conversation_id: str, question: str, history_limit: int = 12
     ) -> AnalysisResult:
