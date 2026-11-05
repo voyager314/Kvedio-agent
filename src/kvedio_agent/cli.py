@@ -453,30 +453,12 @@ def delete_command(job_id: str) -> None:
 
 @app.command("workbench")
 def workbench_command() -> None:
-    """Open the prompted terminal workbench menu."""
+    """Open the stateful terminal workbench."""
 
-    settings = _load_settings()
-    prompt: PromptSession[str] = PromptSession()
-    console.print(Panel("Long-video analysis workbench", title="Kvedio Agent"))
-    while True:
-        _print_jobs()
-        action = prompt.prompt("Action [analyze/ask/show/models/exit]: ").strip().lower()
-        if action in {"exit", "quit", "q"}:
-            return
-        if action == "models":
-            _print_models(settings)
-        elif action == "analyze":
-            video = Path(prompt.prompt("Video path: ").strip())
-            objective = prompt.prompt("Analysis objective: ").strip()
-            _run_analysis(video, objective, settings)
-        elif action == "show":
-            show_command(prompt.prompt("Job ID: ").strip())
-        elif action == "ask":
-            job_id = prompt.prompt("Job ID: ").strip()
-            question = prompt.prompt("Question: ").strip()
-            ask_command(job_id, question)
-        else:
-            console.print("[yellow]Unknown action.[/yellow]")
+    _load_settings()
+    from kvedio_agent.tui import run_workbench
+
+    run_workbench(store)
 
 
 @app.callback(invoke_without_command=True)

@@ -90,6 +90,11 @@ timestamps, and prices must be checked with the provider before use. See
 - `kvedio-agent cancel JOB_ID` marks work cancelled; `delete JOB_ID` removes
   generated job data and leaves the source video untouched.
 
+The workbench is a Textual application. It restores the durable job list,
+stage milestones, timestamped evidence, and follow-up input from the local
+SQLite workspace. The non-interactive commands remain available for scripts and
+diagnostics.
+
 Jobs, stages, segment artifacts, evidence, scratchpad checkpoints, conversations,
 messages, and events are stored in SQLite below the workspace. Default artifact
 retention is 30 days and can be changed with `runtime.retention_days`. Expiry
