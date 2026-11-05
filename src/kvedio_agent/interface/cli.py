@@ -84,10 +84,17 @@ def _print_jobs() -> None:
     table.add_column("Status")
     table.add_column("Stage")
     table.add_column("Video")
+    table.add_column("Actual USD")
+    table.add_column("Est. only USD")
+    table.add_column("Reserved USD")
     for job in store.job_history():
+        usage = store.usage_summary(job["id"])
         table.add_row(
             job["id"][:8], job["status"], job["current_stage"] or "",
             Path(job["source_path"]).name,
+            f"{usage['actual_cost_usd']:.4f}",
+            f"{usage['estimated_only_cost_usd']:.4f}",
+            f"{usage['reserved_cost_usd']:.4f}",
         )
     console.print(table)
 

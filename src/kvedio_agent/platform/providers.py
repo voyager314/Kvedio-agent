@@ -54,11 +54,11 @@ class VisualObservation:
 class Completion:
     """Text completion and provider-reported usage; absent usage remains unknown."""
 
-    content: str
-    model: str | None = None
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-    actual_cost_usd: float | None = None
+    content: str  # Generated text; empty only if the provider returns empty content.
+    model: str | None = None  # Resolved provider model name, or None when not reported.
+    input_tokens: int | None = None  # Provider-reported input token count; None if absent.
+    output_tokens: int | None = None  # Provider-reported output token count; None if absent.
+    actual_cost_usd: float | None = None  # Derived USD cost; None if pricing or usage is absent.
 
 
 class ProviderError(RuntimeError):

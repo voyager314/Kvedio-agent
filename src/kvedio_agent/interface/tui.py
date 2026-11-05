@@ -37,6 +37,18 @@ def evidence_lines(evidence: list[dict[str, Any]]) -> str:
     )
 
 
+def usage_lines(summary: dict[str, Any]) -> str:
+    """Format actual spend, estimates, active reservations, and unknown calls distinctly."""
+
+    return (
+        f"Actual: ${summary['actual_cost_usd']:.4f}  "
+        f"Estimated only: ${summary['estimated_only_cost_usd']:.4f} "
+        f"({summary['estimated_only_calls']} calls)  "
+        f"Reserved: ${summary['reserved_cost_usd']:.4f}  "
+        f"Unknown: {summary['unknown_calls']} calls"
+    )
+
+
 class WorkbenchApp(App[None]):
     """Render durable jobs and evidence while delegating commands to the CLI."""
 
@@ -46,6 +58,7 @@ class WorkbenchApp(App[None]):
     #jobs { width: 34%; border: solid $accent; }
     #details { width: 66%; }
     #events, #evidence { height: 1fr; border: solid $panel; padding: 1; overflow-y: auto; }
+    #usage { height: 3; padding: 1; }
     #ask { dock: bottom; }
     """
 
@@ -61,6 +74,7 @@ class WorkbenchApp(App[None]):
             with Vertical(id="details"):
                 yield Static("Select a job", id="events")
                 yield Static("No evidence selected", id="evidence")
+                yield Static("No usage data", id="usage")
         yield Input(placeholder="Ask a follow-up for the selected job", id="ask")
         yield Footer()
 
@@ -91,10 +105,12 @@ class WorkbenchApp(App[None]):
             return
         events = self.store.job_events(self.selected_job_id)
         evidence = self.store.job_evidence(self.selected_job_id)
+        usage = self.store.usage_summary(self.selected_job_id)
         self.query_one("#events", Static).update(event_lines(events) or "No stage events")
         self.query_one("#evidence", Static).update(
             evidence_lines(evidence) or "No evidence"
         )
+        self.query_one("#usage", Static).update(usage_lines(usage))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Acknowledge follow-up input without running network work in the UI thread."""
