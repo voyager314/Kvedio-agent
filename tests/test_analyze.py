@@ -14,7 +14,10 @@ class FakeModel:
         self.response = response
         self.prompts: list[str] = []
 
-    def complete(self, system: str, prompt: str) -> Completion:
+    def complete(
+        self, system: str, prompt: str,
+        tools: list[dict[str, object]] | None = None,
+    ) -> Completion:
         self.prompts.append(prompt)
         return Completion(json.dumps(self.response))
 
@@ -72,6 +75,46 @@ def test_follow_up_persists_turns_for_restart(tmp_path: Path) -> None:
     assert [message["role"] for message in messages] == ["user", "assistant"]
 
 
+def test_follow_up_executes_bounded_read_only_tool_call(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    job_id, evidence_id, conversation_id = _job(store, tmp_path)
+
+    class ToolModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(
+            self, system: str, prompt: str,
+            tools: list[dict[str, object]] | None = None,
+        ) -> Completion:
+            self.calls += 1
+            if self.calls == 1:
+                return Completion(
+                    "",
+                    tool_calls=(
+                        {
+                            "id": "call-1", "name": "search_evidence",
+                            "arguments": '{"query":"launch"}',
+                        },
+                    ),
+                )
+            return Completion(json.dumps({
+                "objective": "What next?",
+                "plan": [],
+                "claims": [{
+                    "text": "Launch approved", "evidence_ids": [evidence_id],
+                    "confidence": 0.8,
+                }],
+                "uncertainties": [],
+                "quality_assessment": "Supported.",
+            }))
+
+    result = AnalysisService(store, EvidenceIndex(store), ToolModel()).follow_up(
+        job_id, conversation_id, "What next?"
+    )
+    assert result.claims[0].evidence_ids == [evidence_id]
+
+
 def test_segment_and_timeline_agents_persist_only_valid_evidence_links(
     tmp_path: Path,
 ) -> None:
@@ -88,7 +131,10 @@ def test_segment_and_timeline_agents_persist_only_valid_evidence_links(
                                "evidence_ids": ["summary-ref"]}]},
             ]
 
-        def complete(self, system: str, prompt: str) -> Completion:
+        def complete(
+            self, system: str, prompt: str,
+            tools: list[dict[str, object]] | None = None,
+        ) -> Completion:
             response = self.responses.pop(0)
             if "chapters" in response:
                 summary = store.evidence_for_modality(job_id, "segment_summary")[0]

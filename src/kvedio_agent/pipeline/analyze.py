@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kvedio_agent.pipeline.context import EvidenceIndex
+from kvedio_agent.pipeline.tools import JobToolRegistry, ToolCallError
 from kvedio_agent.platform.costs import ProviderGate
 from kvedio_agent.platform.prompting import PromptRenderer
 from kvedio_agent.platform.providers import Completion, ProviderError
@@ -19,7 +20,10 @@ from kvedio_agent.platform.storage import Store
 class TextModel(Protocol):
     """Small text generation surface required by the analysis workflow."""
 
-    def complete(self, system: str, prompt: str) -> Completion: ...
+    def complete(
+        self, system: str, prompt: str,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> Completion: ...
 
 
 class ConclusionClaim(BaseModel):
@@ -239,11 +243,33 @@ class AnalysisService:
         if not context:
             context = self.store.recent_evidence(job_id, self.index.budget.max_items)
         history = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
+        registry = JobToolRegistry(self.store, job_id)
+        tool_instruction = self.prompts.render("tool_selection")
         prompt = self.prompts.render(
             "follow_up", question=question, history=history,
-            evidence=_format_evidence(context),
+            evidence=_format_evidence(context), tool_instruction=tool_instruction,
         )
-        response = self._complete("follow_up", prompt)
+        completion = self._complete_result("follow_up", prompt, registry.schemas())
+        for _ in range(3):
+            if not completion.tool_calls:
+                break
+            tool_results = []
+            for call in completion.tool_calls:
+                try:
+                    arguments = json.loads(call["arguments"])
+                    tool_result = registry.call(call["name"], arguments)
+                except (json.JSONDecodeError, ToolCallError):
+                    raise ProviderError("analysis_invalid_tool_call", retryable=False) from None
+                for item in tool_result.get("evidence", []):
+                    row = self.store.evidence_by_id(item["evidence_id"])
+                    if row is not None and row["id"] not in {entry["id"] for entry in context}:
+                        context.append(row)
+                tool_results.append(json.dumps(tool_result, ensure_ascii=False))
+            prompt += "\n\nTool results:\n" + "\n".join(tool_results)
+            completion = self._complete_result("follow_up", prompt, registry.schemas())
+        if completion.tool_calls:
+            raise ProviderError("analysis_tool_call_limit", retryable=False)
+        response = completion.content
         try:
             result = AnalysisResult.model_validate(_parse_json(response))
         except (ValidationError, ValueError):
@@ -258,8 +284,18 @@ class AnalysisService:
         return result
 
     def _complete(self, stage: str, prompt: str) -> str:
+        return self._complete_result(stage, prompt).content
+
+    def _complete_result(
+        self, stage: str, prompt: str,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> Completion:
         if self.gate is None or self.job_id is None:
-            return self.model.complete("", prompt).content
+            return (
+                self.model.complete("", prompt, tools)
+                if tools is not None
+                else self.model.complete("", prompt)
+            )
         model_name = getattr(self.model, "model", "chat")
         prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         reservation = self.gate.reserve(
@@ -269,7 +305,11 @@ class AnalysisService:
             self.gate.estimate_chat(prompt, output_tokens=2048),
         )
         try:
-            response = self.model.complete("", prompt)
+            response = (
+                self.model.complete("", prompt, tools)
+                if tools is not None
+                else self.model.complete("", prompt)
+            )
         except Exception:
             self.gate.settle(reservation, None, failed=True)
             raise
@@ -277,7 +317,7 @@ class AnalysisService:
             reservation, response.actual_cost_usd,
             response.input_tokens, response.output_tokens,
         )
-        return response.content
+        return response
 
 
 def _format_evidence(items: list[dict[str, Any]]) -> str:

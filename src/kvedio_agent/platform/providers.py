@@ -59,6 +59,7 @@ class Completion:
     input_tokens: int | None = None  # Provider-reported input token count; None if absent.
     output_tokens: int | None = None  # Provider-reported output token count; None if absent.
     actual_cost_usd: float | None = None  # Derived USD cost; None if pricing or usage is absent.
+    tool_calls: tuple[dict[str, Any], ...] = ()  # Provider function calls, empty when absent.
 
 
 class ProviderError(RuntimeError):
@@ -73,7 +74,10 @@ class ProviderError(RuntimeError):
 class ChatProvider(Protocol):
     """Generate bounded text analysis from structured evidence context."""
 
-    def complete(self, system: str, prompt: str) -> Completion: ...
+    def complete(
+        self, system: str, prompt: str,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> Completion: ...
 
 
 class LiteLLMChat:
@@ -93,7 +97,10 @@ class LiteLLMChat:
         self.gate = gate
         self.job_id = job_id
 
-    def complete(self, system: str, prompt: str) -> Completion:
+    def complete(
+        self, system: str, prompt: str,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> Completion:
         """Return one model response or a bounded provider error category."""
 
         reservation = self._reserve("chat", system, prompt)
@@ -108,6 +115,9 @@ class LiteLLMChat:
             kwargs["api_key"] = key
         if self.model.api_base:
             kwargs["api_base"] = self.model.api_base
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
         try:
             response = litellm.completion(**kwargs)
             content = response.choices[0].message.content
@@ -401,7 +411,17 @@ def _completion(response: Any, content: str, configured: ModelEntry) -> Completi
                 input_tokens * configured.input_cost_per_million
                 + output_tokens * configured.output_cost_per_million
             ) / 1_000_000
-    return Completion(content, model_name, input_tokens, output_tokens, actual_cost)
+    message = response.choices[0].message
+    raw_calls = getattr(message, "tool_calls", None) or []
+    calls = tuple(
+        {
+            "id": str(call.id),
+            "name": str(call.function.name),
+            "arguments": call.function.arguments,
+        }
+        for call in raw_calls
+    )
+    return Completion(content, model_name, input_tokens, output_tokens, actual_cost, calls)
 
 
 def _file_digest(path: Path) -> str:

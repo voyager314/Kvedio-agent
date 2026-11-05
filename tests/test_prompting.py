@@ -33,4 +33,5 @@ def test_prompt_template_directory_contains_all_runtime_templates() -> None:
         "follow_up",
         "segment_extraction",
         "timeline_reduction",
+        "tool_selection",
     }

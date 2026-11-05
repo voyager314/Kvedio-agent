@@ -269,6 +269,34 @@ class Store:
                     VALUES (3, CURRENT_TIMESTAMP);
                     """
                 )
+            self._ensure_evidence_search(connection)
+
+    @staticmethod
+    def _ensure_evidence_search(connection: sqlite3.Connection) -> None:
+        """Create and backfill the FTS index used for bounded evidence retrieval."""
+
+        connection.execute(
+            """CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
+                evidence_id UNINDEXED, job_id UNINDEXED, modality UNINDEXED,
+                start_ms UNINDEXED, end_ms UNINDEXED, content,
+                tokenize='unicode61')"""
+        )
+        indexed = connection.execute("SELECT COUNT(*) AS count FROM evidence_fts").fetchone()
+        has_evidence = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='evidence'"
+        ).fetchone()
+        if not has_evidence:
+            return
+        evidence = connection.execute(
+            "SELECT id, job_id, modality, start_ms, end_ms, content FROM evidence "
+            "WHERE content IS NOT NULL"
+        ).fetchall()
+        if indexed["count"] != len(evidence):
+            connection.execute("DELETE FROM evidence_fts")
+            connection.executemany(
+                "INSERT INTO evidence_fts VALUES (?, ?, ?, ?, ?, ?)",
+                [tuple(row) for row in evidence],
+            )
 
     def register_source(
         self,
@@ -472,6 +500,11 @@ class Store:
                 (evidence_id, job_id, modality, start_ms, end_ms, content, artifact_id,
                  confidence, _json(provenance), _timestamp()),
             )
+            if content is not None:
+                connection.execute(
+                    "INSERT INTO evidence_fts VALUES (?, ?, ?, ?, ?, ?)",
+                    (evidence_id, job_id, modality, start_ms, end_ms, content),
+                )
         return evidence_id
 
     def save_checkpoint(self, job_id: str, scratchpad: dict[str, Any]) -> None:
@@ -712,6 +745,16 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def job_stages(self, job_id: str) -> list[dict[str, Any]]:
+        """Return durable stage status, attempt, and progress for one job."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT name, status, attempt, progress, error_category FROM stages "
+                "WHERE job_id=? ORDER BY rowid", (job_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def delete_job(self, job_id: str) -> None:
         """Delete generated job metadata and workspace files without touching sources."""
 
@@ -749,21 +792,55 @@ class Store:
         return [dict(row) for row in rows]
 
     def search_evidence(
-        self, job_id: str, query_terms: list[str], limit: int
+        self, job_id: str, query_terms: list[str], limit: int,
+        modality: str | None = None, start_ms: int | None = None,
+        end_ms: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return text evidence matching any query term in source-time order."""
+        """Return ranked FTS evidence with optional modality and time filters."""
 
         terms = [term.strip() for term in query_terms if term.strip()]
         if not terms or limit <= 0:
             return []
-        clauses = " OR ".join("content LIKE ?" for _ in terms)
-        parameters: list[Any] = [job_id, *(f"%{term}%" for term in terms), limit]
+        match = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
+        filters = ["e.job_id=?"]
+        parameters: list[Any] = [job_id]
+        if modality is not None:
+            filters.append("e.modality=?")
+            parameters.append(modality)
+        if start_ms is not None:
+            filters.append("e.start_ms < ?")
+            parameters.append(start_ms)
+        if end_ms is not None:
+            filters.append("e.end_ms > ?")
+            parameters.append(end_ms)
+        parameters.append(match)
+        parameters.append(limit)
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT * FROM evidence WHERE job_id=? AND content IS NOT NULL AND ({clauses}) "
-                "ORDER BY start_ms, end_ms LIMIT ?",
+                "SELECT e.* FROM evidence e JOIN evidence_fts f ON f.evidence_id=e.id "
+                f"WHERE {' AND '.join(filters)} AND evidence_fts MATCH ? "
+                "ORDER BY bm25(evidence_fts), e.start_ms, e.end_ms LIMIT ?",
                 parameters,
             ).fetchall()
+            if not rows:
+                like_filters = ["job_id=?", "content IS NOT NULL"]
+                like_values: list[Any] = [job_id]
+                like_filters.extend("content LIKE ?" for _ in terms)
+                like_values.extend(f"%{term}%" for term in terms)
+                if modality is not None:
+                    like_filters.append("modality=?")
+                    like_values.append(modality)
+                if start_ms is not None:
+                    like_filters.append("start_ms < ?")
+                    like_values.append(start_ms)
+                if end_ms is not None:
+                    like_filters.append("end_ms > ?")
+                    like_values.append(end_ms)
+                like_values.append(limit)
+                rows = connection.execute(
+                    f"SELECT * FROM evidence WHERE {' AND '.join(like_filters)} "
+                    "ORDER BY start_ms, end_ms LIMIT ?", like_values,
+                ).fetchall()
         return [dict(row) for row in rows]
 
     def checkpoint(self, job_id: str) -> dict[str, Any] | None:
