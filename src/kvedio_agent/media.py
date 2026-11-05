@@ -128,13 +128,20 @@ class MediaProcessor:
             end = min(start + segment_ms, media.duration_ms)
             segment_id = self.store.add_segment(job_id, "media", start, end)
             audio_path = output_dir / f"{start:012d}-{end:012d}.wav"
-            frame_path = output_dir / f"{start:012d}-{end:012d}.jpg"
+            frame_paths = [
+                output_dir / f"{start:012d}-{end:012d}-{index}.jpg"
+                for index in range(3)
+            ]
             if not audio_path.exists() and media.audio_streams:
                 self._write_audio(source, start, end, audio_path)
-            if not frame_path.exists() and media.video_streams:
-                self._write_keyframe(source, start, end, frame_path)
+            frame_times = []
+            if media.video_streams:
+                frame_times = self._write_keyframes(source, start, end, frame_paths)
             artifact_id = None
-            for kind, artifact_path in (("audio", audio_path), ("keyframe", frame_path)):
+            generated = [("audio", audio_path)] + [
+                ("keyframe", path) for path in frame_paths if path.exists()
+            ]
+            for kind, artifact_path in generated:
                 if artifact_path.exists():
                     artifact_id = self.store.add_artifact(
                         job_id, kind, artifact_path, _file_digest(artifact_path),
@@ -147,7 +154,8 @@ class MediaProcessor:
                     "start_ms": start,
                     "end_ms": end,
                     "audio": str(audio_path) if audio_path.exists() else None,
-                    "keyframe": str(frame_path) if frame_path.exists() else None,
+                    "keyframes": [str(path) for path in frame_paths if path.exists()],
+                    "frame_times_ms": frame_times,
                 }
             )
             temporary_manifest = manifest_path.with_suffix(".tmp")
@@ -177,31 +185,56 @@ class MediaProcessor:
                 if timestamp_ms + int(frame.samples * 1000 / frame.sample_rate) <= start_ms:
                     continue
                 for output in resampler.resample(frame):
-                    chunks.append(output.to_ndarray().tobytes())
+                    if output.pts is None or output.time_base is None:
+                        continue
+                    output_start_ms = int(output.pts * output.time_base * 1000)
+                    first = max(0, int((start_ms - output_start_ms) * 16_000 / 1000))
+                    last = min(
+                        output.samples,
+                        int((end_ms - output_start_ms) * 16_000 / 1000),
+                    )
+                    if last > first:
+                        chunks.append(output.to_ndarray()[:, first:last].tobytes())
             with wave.open(str(target), "wb") as wav:
                 wav.setnchannels(1)
                 wav.setsampwidth(2)
                 wav.setframerate(16_000)
                 wav.writeframes(b"".join(chunks))
 
-    def _write_keyframe(self, source: Path, start_ms: int, end_ms: int, target: Path) -> None:
+    @staticmethod
+    def _frame_times(start_ms: int, end_ms: int, count: int) -> list[int]:
+        return [start_ms + ((end_ms - start_ms) * (index + 1)) // (count + 1)
+                for index in range(count)]
+
+    def _write_keyframes(
+        self, source: Path, start_ms: int, end_ms: int, targets: list[Path]
+    ) -> list[int]:
         with av.open(str(source), mode="r") as container:
             stream = container.streams.video[0]
             if stream.time_base is None:
                 raise ValueError("video stream has no time base")
-            seek_ms = start_ms + (end_ms - start_ms) // 2
-            seek_pts = int(seek_ms * av.time_base / 1000 / stream.time_base)
+            sample_times = self._frame_times(start_ms, end_ms, len(targets))
+            seek_pts = int(start_ms * av.time_base / 1000 / stream.time_base)
             container.seek(seek_pts, stream=stream, backward=True, any_frame=False)
+            written: list[int] = []
+            next_sample = 0
             for frame in container.decode(stream):
                 if frame.pts is None:
                     continue
                 timestamp_ms = int(frame.pts * (frame.time_base or stream.time_base) * 1000)
-                if timestamp_ms < start_ms:
-                    continue
                 if timestamp_ms >= end_ms:
                     break
+                if next_sample >= len(sample_times):
+                    break
+                remaining_frames = len(targets) - next_sample
+                remaining_samples = len(sample_times) - next_sample
+                if (
+                    timestamp_ms < sample_times[next_sample]
+                    and remaining_frames > remaining_samples
+                ):
+                    continue
                 rgb = frame.reformat(format="yuvj420p")
-                with av.open(str(target), mode="w", format="image2") as output:
+                with av.open(str(targets[next_sample]), mode="w", format="image2") as output:
                     image_stream = cast(av.video.stream.VideoStream, output.add_stream("mjpeg"))
                     image_stream.width = rgb.width
                     image_stream.height = rgb.height
@@ -210,7 +243,10 @@ class MediaProcessor:
                         output.mux(packet)
                     for packet in image_stream.encode(None):
                         output.mux(packet)
-                return
+                written.append(timestamp_ms)
+                next_sample += 1
+            return written
+        return []
 
 
 def validate_resume(path: Path, expected: SourceFingerprint) -> bool:

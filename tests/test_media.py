@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from fractions import Fraction
 from pathlib import Path
 
@@ -59,6 +60,11 @@ def test_preprocess_creates_time_indexed_keyframes_and_resumes(
     manifest_path = processor.manifest_path(fingerprint(sample_video).digest)
     assert media.duration_ms == 2000
     assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(manifest["segments"][0]["keyframes"]) == len(
+        manifest["segments"][0]["frame_times_ms"]
+    )
+    assert manifest["segments"][0]["frame_times_ms"] == [0, 500]
     _, resumed_job_id, _ = processor.preprocess(sample_video)
     reopened = Store(tmp_path / "workspace")
     assert resumed_job_id == job_id

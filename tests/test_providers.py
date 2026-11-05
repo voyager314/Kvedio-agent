@@ -9,6 +9,7 @@ import pytest
 from kvedio_agent.providers import (
     LiteLLMChat,
     OpenAICompatibleASR,
+    OpenAICompatibleVision,
     ProviderError,
     _parse_transcript,
 )
@@ -67,3 +68,28 @@ def test_chat_adapter_suppresses_raw_exception_and_secret(
         adapter.complete("system", "prompt")
     assert "sentinel-secret" not in str(raised.value)
     assert raised.value.__cause__ is None
+
+
+def test_visual_observation_preserves_frame_source_timestamps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VISION_TOKEN", "vision-secret")
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"jpeg")
+    model = ModelEntry(
+        model="vision/model", api_base="https://provider.example/v1",
+        api_key_env="VISION_TOKEN", roles=["vision"],
+    )
+
+    def response(*args: object, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": "A slide"}}]},
+        )
+
+    monkeypatch.setattr(httpx, "post", response)
+    result = OpenAICompatibleVision(model).describe([(frame, 1250)], 1000, 1500)
+    assert result.frame_times_ms == (1250,)
+    assert result.start_ms == 1000

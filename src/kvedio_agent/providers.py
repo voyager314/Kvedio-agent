@@ -44,6 +44,7 @@ class VisualObservation:
     summary: str
     ocr_text: str | None = None
     confidence: float | None = None
+    frame_times_ms: tuple[int, ...] = ()
     frame_paths: tuple[str, ...] = ()
 
 
@@ -162,15 +163,18 @@ class OpenAICompatibleVision:
         self.api_base = model.api_base.rstrip("/")
         self.timeout_seconds = timeout_seconds
 
-    def describe(self, frame_paths: list[Path], start_ms: int, end_ms: int) -> VisualObservation:
+    def describe(
+        self, frames: list[tuple[Path, int]], start_ms: int, end_ms: int
+    ) -> VisualObservation:
         """Send a bounded image set and normalize a textual visual observation."""
 
         content: list[dict[str, Any]] = [
             {"type": "text", "text": "Describe important visible events and on-screen text."}
         ]
-        for frame in frame_paths:
+        for frame, timestamp_ms in frames:
             mime = mimetypes.guess_type(frame.name)[0] or "image/jpeg"
             encoded = base64.b64encode(frame.read_bytes()).decode("ascii")
+            content.append({"type": "text", "text": f"Source timestamp: {timestamp_ms} ms"})
             content.append(
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
             )
@@ -193,7 +197,9 @@ class OpenAICompatibleVision:
             data = response.json()
             summary = str(data["choices"][0]["message"]["content"])
             return VisualObservation(
-                start_ms, end_ms, summary, frame_paths=tuple(map(str, frame_paths))
+                start_ms, end_ms, summary,
+                frame_times_ms=tuple(timestamp for _, timestamp in frames),
+                frame_paths=tuple(str(path) for path, _ in frames),
             )
         except ProviderError:
             raise

@@ -168,7 +168,7 @@ def _evidence_context(settings: Settings, job_id: str) -> list[dict[str, Any]]:
             vision_units = [
                 WorkUnit(segment["id"], segment["start_ms"], segment["end_ms"], segment)
                 for segment in manifest["segments"]
-                if segment.get("keyframe")
+                if segment.get("keyframes")
                 and not store.evidence_exists(
                     job_id, "visual", segment["start_ms"], segment["end_ms"]
                 )
@@ -177,7 +177,12 @@ def _evidence_context(settings: Settings, job_id: str) -> list[dict[str, Any]]:
             def inspect(unit: WorkUnit) -> Any:
                 provider = OpenAICompatibleVision(vision_entry, vision_entry.timeout_seconds)
                 return provider.describe(
-                    [Path(unit.payload["keyframe"])], unit.start_ms, unit.end_ms
+                    list(zip(
+                        [Path(path) for path in unit.payload["keyframes"]],
+                        unit.payload["frame_times_ms"],
+                    )),
+                    unit.start_ms,
+                    unit.end_ms,
                 )
 
             def save_observation(unit: WorkUnit, observation: Any) -> None:
