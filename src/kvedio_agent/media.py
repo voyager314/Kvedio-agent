@@ -78,7 +78,9 @@ class MediaProcessor:
         self.store = store
         self.config = config
 
-    def preprocess(self, path: Path) -> tuple[str, str, MediaProbe]:
+    def preprocess(
+        self, path: Path, objective: str = "media preprocessing"
+    ) -> tuple[str, str, MediaProbe]:
         """Register a source and produce deterministic, checkpointed media windows."""
 
         source = path.expanduser().resolve(strict=True)
@@ -87,7 +89,6 @@ class MediaProcessor:
         source_id = self.store.find_source(source, identity.digest) or self.store.register_source(
             source, identity.size_bytes, identity.modified_ns, identity.digest, media.__dict__
         )
-        objective = "media preprocessing"
         job_id = self.store.find_job(source_id, objective) or self.store.create_job(
             source_id, objective, self.config.model_dump()
         )

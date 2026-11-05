@@ -450,6 +450,50 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def latest_conversation(self, job_id: str) -> str | None:
+        """Return the most recently updated conversation for a job."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM conversations WHERE job_id=? ORDER BY updated_at DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+        return str(row["id"]) if row else None
+
+    def evidence_by_id(self, evidence_id: str) -> dict[str, Any] | None:
+        """Return one evidence row for citation rendering."""
+
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM evidence WHERE id=?", (evidence_id,)).fetchone()
+        return dict(row) if row else None
+
+    def job_evidence(self, job_id: str) -> list[dict[str, Any]]:
+        """Return all evidence for a job in source-time order."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM evidence WHERE job_id=? ORDER BY start_ms, end_ms", (job_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_job(self, job_id: str) -> None:
+        """Delete generated job metadata and workspace files without touching sources."""
+
+        with self._connect() as connection:
+            artifact_paths = connection.execute(
+                "SELECT path FROM artifacts WHERE job_id=?", (job_id,)
+            ).fetchall()
+            source = connection.execute(
+                "SELECT source_id FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            connection.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+            if source:
+                connection.execute("DELETE FROM video_sources WHERE id=?", (source["source_id"],))
+        for row in artifact_paths:
+            path = Path(row["path"]).resolve()
+            if path.is_relative_to(self.root) and path.is_file():
+                path.unlink()
+
     def evidence_for_range(self, job_id: str, start_ms: int, end_ms: int) -> list[dict[str, Any]]:
         """Return evidence overlapping a requested source-relative time range."""
 
