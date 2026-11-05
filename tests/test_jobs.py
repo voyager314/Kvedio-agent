@@ -158,6 +158,24 @@ def test_run_attempt_limit_overrides_scheduler_default(tmp_path: Path) -> None:
     assert calls == result.attempts == 2
 
 
+def test_cancelled_retry_is_recorded_as_cancelled_result(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    job_id = _job(store, tmp_path)
+    segment = store.add_segment(job_id, "asr", 0, 1000)
+    scheduler = StageScheduler(store, 1, base_delay_seconds=0.2)
+
+    def worker(unit: WorkUnit) -> None:
+        scheduler.cancel()
+        raise ProviderError("temporary", retryable=True)
+
+    result = scheduler.run(
+        job_id, "asr", [WorkUnit(segment, 0, 1000, None)], worker,
+        lambda unit, value: None,
+    )[0]
+    assert result.error_category == "cancelled"
+    assert store.pending_segments(job_id, "asr")[0]["status"] == "cancelled"
+
+
 def test_benchmark_reports_serial_and_concurrent_modes() -> None:
     serial, concurrent = run_benchmark(units=4, workers=2, unit_seconds=0)
     assert serial.mode == "serial"

@@ -118,6 +118,12 @@ class StageScheduler:
             while pending or delayed or not exhausted:
                 if self._cancel.is_set():
                     exhausted = True
+                    raw_results.extend(
+                        WorkResult(
+                            unit.id, error_category="cancelled", attempts=attempts[unit.id]
+                        )
+                        for _, _, unit in delayed
+                    )
                     delayed.clear()
                 now = time.monotonic()
                 while delayed and delayed[0][0] <= now and len(pending) < worker_limit:
@@ -154,7 +160,11 @@ class StageScheduler:
                              sequence, unit),
                         )
                         continue
-                    if result.retryable:
+                    if result.retryable and self._cancel.is_set():
+                        result = WorkResult(
+                            result.unit_id, error_category="cancelled", attempts=result.attempts
+                        )
+                    elif result.retryable:
                         result = WorkResult(
                             result.unit_id, error_category=result.error_category,
                             attempts=result.attempts,
