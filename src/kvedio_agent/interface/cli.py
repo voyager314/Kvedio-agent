@@ -13,7 +13,7 @@ from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
-from kvedio_agent.pipeline.analyze import AnalysisService
+from kvedio_agent.pipeline.analyze import AnalysisResult, AnalysisService
 from kvedio_agent.pipeline.context import EvidenceIndex, Scratchpad
 from kvedio_agent.pipeline.jobs import StageScheduler, WorkUnit
 from kvedio_agent.pipeline.media import MediaProcessor, fingerprint
@@ -447,6 +447,30 @@ def ask_command(job_id: str, question: str, session_id: str | None = None) -> No
     console.print(f"Session: {selected}")
 
 
+@app.command("locate")
+def locate_command(job_id: str, start_ms: int, end_ms: int) -> None:
+    """Show transcript and visual evidence overlapping a source-time range."""
+
+    job = _job(job_id)
+    settings = _load_settings()
+    result = AnalysisService(
+        store, EvidenceIndex(store), _chat(settings, job["id"])
+    ).locate(job["id"], start_ms, end_ms)
+    table = Table(title=f"Evidence {result.start_ms}..{result.end_ms} ms")
+    table.add_column("Evidence")
+    table.add_column("Time")
+    table.add_column("Modality")
+    table.add_column("Content")
+    for item in result.matches:
+        table.add_row(
+            item.evidence_id, f"{item.start_ms}..{item.end_ms} ms",
+            item.modality, item.content,
+        )
+    console.print(table)
+    if result.uncertainty:
+        console.print(Panel(result.uncertainty, title="Uncertainty"))
+
+
 @app.command("cancel")
 def cancel_command(job_id: str) -> None:
     """Mark a job as cancelled for recovery and future worker checks."""
@@ -469,10 +493,18 @@ def delete_command(job_id: str) -> None:
 def workbench_command() -> None:
     """Open the stateful terminal workbench."""
 
-    _load_settings()
+    settings = _load_settings()
     from kvedio_agent.interface.tui import run_workbench
 
-    run_workbench(store)
+    def follow_up(job_id: str, question: str) -> AnalysisResult:
+        selected = store.latest_conversation(job_id)
+        if selected is None:
+            selected = store.create_conversation(job_id, question)
+        return AnalysisService(
+            store, EvidenceIndex(store), _chat(settings, job_id)
+        ).follow_up(job_id, selected, question)
+
+    run_workbench(store, follow_up)
 
 
 @app.callback(invoke_without_command=True)

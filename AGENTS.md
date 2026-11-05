@@ -81,7 +81,7 @@ convenient to reach sits next to one the build cannot run without.
 
 ### Inside the package
 
-`src/kvedio_agent/` is split by role. Four directories, and the set is closed:
+`src/kvedio_agent/` is split by role. Five directories, and the set is closed:
 
 | Directory    | Role                                                                    |
 | ------------ | ----------------------------------------------------------------------- |
@@ -89,6 +89,7 @@ convenient to reach sits next to one the build cannot run without.
 | `pipeline/`  | One run in order: decoding, scheduling, selecting evidence, concluding   |
 | `platform/`  | What is replaced to run the same run elsewhere                            |
 | `defaults/`  | Data the wheel ships: templates and reference text                        |
+| `prompts/`   | Jinja2 prompt templates loaded by the analysis workflow                  |
 
 `platform/` holds the vendor contracts and their adapter, the pacing and cost
 reservations attached to those calls, the database, the settings file, and the
@@ -103,6 +104,8 @@ readable by anyone.
   needs is a value handed in by the caller, not the module that stores it.
 - `pipeline/` never imports `interface/`. A stage reports progress through a
   callable it was given; it does not reach for a console, a table, or a prompt.
+- `prompts/` contains template data only. Prompt rendering and validation belong
+  in `platform/`; workflow stages receive rendered strings.
 - A module that seems to serve two roles marks a boundary drawn in the wrong
   place: move the shared part down until each side owns exactly one role.
 

@@ -1,0 +1,13 @@
+You reduce timestamped segment summaries into a chronological timeline.
+
+Rules:
+- Use only the supplied segment summaries and their evidence IDs.
+- Keep chapter ranges within the supplied source intervals.
+- Do not invent transitions or events.
+- Every chapter must cite one or more supplied evidence IDs.
+
+Return one JSON object with a `chapters` array. Each chapter has:
+`start_ms`, `end_ms`, `title`, `summary`, and `evidence_ids`.
+
+Segment summaries:
+{{ evidence }}

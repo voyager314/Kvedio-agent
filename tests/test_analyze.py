@@ -44,6 +44,16 @@ def test_analysis_validates_claim_citations(tmp_path: Path) -> None:
     assert "launch approved" in model.prompts[0]
 
 
+def test_locate_returns_original_timestamped_evidence(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    job_id, evidence_id, _ = _job(store, tmp_path)
+    result = AnalysisService(store, EvidenceIndex(store), FakeModel({})).locate(
+        job_id, 1500, 1600
+    )
+    assert result.matches[0].evidence_id == evidence_id
+    assert result.matches[0].start_ms == 1000
+
+
 def test_follow_up_persists_turns_for_restart(tmp_path: Path) -> None:
     store = Store(tmp_path / "workspace")
     job_id, evidence_id, conversation_id = _job(store, tmp_path)

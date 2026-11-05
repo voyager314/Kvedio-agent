@@ -82,6 +82,8 @@ timestamps, and prices must be checked with the provider before use. See
 - `kvedio-agent resume JOB_ID` continues a job using its source fingerprint and
   completed artifacts.
 - `kvedio-agent show JOB_ID` displays timestamped evidence.
+- `kvedio-agent locate JOB_ID START_MS END_MS` returns original transcript and
+  visual evidence overlapping a source-relative time range.
 - `kvedio-agent ask JOB_ID "What changed later?"` continues the latest session;
   pass `--session SESSION_ID` to select another one.
 - `kvedio-agent models` lists model roles and whether their environment keys are
@@ -92,8 +94,9 @@ timestamps, and prices must be checked with the provider before use. See
 
 The workbench is a Textual application. It restores the durable job list,
 stage milestones, timestamped evidence, and follow-up input from the local
-SQLite workspace. The non-interactive commands remain available for scripts and
-diagnostics.
+SQLite workspace. Follow-up answers run outside the UI thread and are persisted
+with their evidence links. Analysis instructions are structured Jinja2
+templates shipped under the package `prompts/` directory.
 
 Jobs, stages, segment artifacts, evidence, scratchpad checkpoints, conversations,
 messages, and events are stored in SQLite below the workspace. Default artifact

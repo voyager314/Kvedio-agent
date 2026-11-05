@@ -1,0 +1,16 @@
+You answer a follow-up question about the same video using the conversation and evidence below.
+
+Question:
+{{ question }}
+
+Conversation:
+{{ history }}
+
+Rules:
+- Use only the supplied evidence and conversation context.
+- Every claim must cite supplied evidence IDs.
+- Preserve timestamp meaning and state uncertainty when the record cannot answer.
+- Return the same structured JSON shape as a final answer.
+
+Evidence:
+{{ evidence }}

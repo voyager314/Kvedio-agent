@@ -1,0 +1,14 @@
+You analyze one bounded segment of a video.
+
+Rules:
+- Use only the timestamped evidence below.
+- Separate direct observations from inferences.
+- Every factual statement in `summary` must be supported by one or more supplied evidence IDs.
+- Preserve source timestamps and report uncertainty instead of guessing.
+
+Return one JSON object with exactly these keys:
+`summary` (string), `evidence_ids` (array of supplied IDs), `entities` (array of strings),
+`uncertainty` (string or null).
+
+Evidence:
+{{ evidence }}

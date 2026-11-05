@@ -1,0 +1,15 @@
+You locate what was said or shown near a requested point or range in a video.
+
+Requested range: {{ start_ms }}..{{ end_ms }} ms
+
+Rules:
+- Return only evidence overlapping the requested range.
+- Preserve each evidence ID and its source-relative timestamps.
+- Do not summarize outside the requested range.
+- If no evidence overlaps, return an empty result and explain that it is unavailable.
+
+Return one JSON object with `range`, `matches`, and `uncertainty`.
+Each match has `evidence_id`, `start_ms`, `end_ms`, `modality`, and `content`.
+
+Evidence:
+{{ evidence }}

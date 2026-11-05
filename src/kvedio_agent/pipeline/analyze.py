@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kvedio_agent.pipeline.context import EvidenceIndex
 from kvedio_agent.platform.costs import ProviderGate
+from kvedio_agent.platform.prompting import PromptRenderer
 from kvedio_agent.platform.providers import Completion, ProviderError
 from kvedio_agent.platform.storage import Store
 
@@ -69,6 +70,25 @@ class TimelineChapter(BaseModel):
         return self.end_ms > self.start_ms
 
 
+class LocatedEvidence(BaseModel):
+    """One evidence item overlapping a requested source-relative time range."""
+
+    evidence_id: str
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    modality: str
+    content: str
+
+
+class ContentLocation(BaseModel):
+    """Timestamped evidence returned for one point or range lookup."""
+
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    matches: list[LocatedEvidence]
+    uncertainty: str | None = None
+
+
 class AnalysisService:
     """Create segment facts, timeline summaries, answers, and durable follow-ups."""
 
@@ -81,6 +101,7 @@ class AnalysisService:
         self.model = model
         self.gate = gate
         self.job_id = job_id
+        self.prompts = PromptRenderer()
 
     def understand_segment(
         self, job_id: str, start_ms: int, end_ms: int, retention_days: int = 30
@@ -90,8 +111,8 @@ class AnalysisService:
         evidence = self.store.evidence_for_range(job_id, start_ms, end_ms)
         if not evidence:
             raise ValueError("segment has no evidence")
-        prompt = _json_prompt(
-            "Extract key facts, entities, and uncertainty from this bounded evidence.", evidence
+        prompt = self.prompts.render(
+            "segment_extraction", evidence=_format_evidence(evidence)
         )
         data = _parse_json(self._complete("segment", prompt))
         fact = SegmentFact(
@@ -133,7 +154,9 @@ class AnalysisService:
         summaries = self.store.evidence_for_modality(job_id, "segment_summary")
         if not summaries:
             return []
-        prompt = _json_prompt("Create chronological chapters and key moments.", summaries)
+        prompt = self.prompts.render(
+            "timeline_reduction", evidence=_format_evidence(summaries)
+        )
         response = self._complete("timeline", prompt)
         data = _parse_json(response)
         raw_chapters = data.get("chapters", [])
@@ -166,7 +189,9 @@ class AnalysisService:
         context.sort(key=lambda item: (item["start_ms"], item["end_ms"]))
         if not context:
             raise ValueError("no matching evidence is available")
-        prompt = _json_prompt(objective, context)
+        prompt = self.prompts.render(
+            "final_answer", objective=objective, evidence=_format_evidence(context)
+        )
         response = self._complete("answer", prompt)
         try:
             result = AnalysisResult.model_validate(_parse_json(response))
@@ -176,6 +201,32 @@ class AnalysisService:
         if any(not set(claim.evidence_ids).issubset(available) for claim in result.claims):
             raise ProviderError("analysis_invalid_citation", retryable=False)
         return result
+
+    def locate(self, job_id: str, start_ms: int, end_ms: int) -> ContentLocation:
+        """Return original evidence overlapping the requested source-relative range."""
+
+        if start_ms < 0 or end_ms <= start_ms:
+            raise ValueError("location range must be positive and ordered")
+        evidence = self.store.evidence_for_range(job_id, start_ms, end_ms)
+        matches = [
+            LocatedEvidence(
+                evidence_id=item["id"],
+                start_ms=item["start_ms"],
+                end_ms=item["end_ms"],
+                modality=item["modality"],
+                content=str(item.get("content") or ""),
+            )
+            for item in evidence
+            if item["modality"] in {"transcript", "visual"}
+        ]
+        return ContentLocation(
+            start_ms=start_ms,
+            end_ms=end_ms,
+            matches=matches,
+            uncertainty=(
+                None if matches else "No transcript or visual evidence overlaps this range."
+            ),
+        )
 
     def follow_up(
         self, job_id: str, conversation_id: str, question: str, history_limit: int = 12
@@ -188,8 +239,10 @@ class AnalysisService:
         if not context:
             context = self.store.recent_evidence(job_id, self.index.budget.max_items)
         history = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
-        prompt = f"Conversation so far:\n{history}\n\nNew question: {question}\n\nEvidence:\n"
-        prompt += _format_evidence(context)
+        prompt = self.prompts.render(
+            "follow_up", question=question, history=history,
+            evidence=_format_evidence(context),
+        )
         response = self._complete("follow_up", prompt)
         try:
             result = AnalysisResult.model_validate(_parse_json(response))
@@ -206,17 +259,17 @@ class AnalysisService:
 
     def _complete(self, stage: str, prompt: str) -> str:
         if self.gate is None or self.job_id is None:
-            return self.model.complete(_system_prompt(stage), prompt).content
+            return self.model.complete("", prompt).content
         model_name = getattr(self.model, "model", "chat")
         prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         reservation = self.gate.reserve(
             self.job_id,
             stage,
             f"{stage}:{prompt_digest}:{model_name}",
-            self.gate.estimate_chat(_system_prompt(stage) + "\n" + prompt, output_tokens=2048),
+            self.gate.estimate_chat(prompt, output_tokens=2048),
         )
         try:
-            response = self.model.complete(_system_prompt(stage), prompt)
+            response = self.model.complete("", prompt)
         except Exception:
             self.gate.settle(reservation, None, failed=True)
             raise
@@ -227,39 +280,12 @@ class AnalysisService:
         return response.content
 
 
-_SEGMENT_SYSTEM = (
-    "Analyze only the supplied timestamped evidence. Return JSON with summary, evidence_ids, "
-    "entities, and uncertainty. Do not invent facts or evidence references."
-)
-_TIMELINE_SYSTEM = (
-    "Synthesize ordered video chapters from supplied segment summaries. Return JSON with "
-    "chapters containing start_ms, end_ms, title, summary, and evidence_ids."
-)
-_ANSWER_SYSTEM = (
-    "Answer using only supplied evidence. Return JSON with objective, plan, claims, "
-    "uncertainties, and quality_assessment. Each claim must cite supplied evidence IDs."
-)
-
-
-def _system_prompt(stage: str) -> str:
-    return {
-        "segment": _SEGMENT_SYSTEM,
-        "timeline": _TIMELINE_SYSTEM,
-        "answer": _ANSWER_SYSTEM,
-        "follow_up": _ANSWER_SYSTEM,
-    }[stage]
-
-
 def _format_evidence(items: list[dict[str, Any]]) -> str:
     return "\n".join(
         f"[{item['id']}] {item['start_ms']}..{item['end_ms']} ms "
         f"{item['modality']}: {item.get('content') or ''}"
         for item in items
     )
-
-
-def _json_prompt(instruction: str, items: list[dict[str, Any]]) -> str:
-    return f"{instruction}\n\nEvidence:\n{_format_evidence(items)}"
 
 
 def _parse_json(response: str) -> dict[str, Any]:

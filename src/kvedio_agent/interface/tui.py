@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
 
+from kvedio_agent.pipeline.analyze import AnalysisResult
 from kvedio_agent.platform.storage import Store
 
 
@@ -62,9 +65,13 @@ class WorkbenchApp(App[None]):
     #ask { dock: bottom; }
     """
 
-    def __init__(self, store: Store) -> None:
+    def __init__(
+        self, store: Store,
+        follow_up: Callable[[str, str], AnalysisResult] | None = None,
+    ) -> None:
         super().__init__()
         self.store = store
+        self.follow_up = follow_up
         self.selected_job_id: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -113,16 +120,38 @@ class WorkbenchApp(App[None]):
         self.query_one("#usage", Static).update(usage_lines(usage))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Acknowledge follow-up input without running network work in the UI thread."""
+        """Submit a follow-up in a worker and render its structured result."""
 
-        if self.selected_job_id:
-            self.query_one("#events", Static).update(
-                f"Follow-up queued for {self.selected_job_id[:8]}: {event.value}"
-            )
+        follow_up = self.follow_up
+        if self.selected_job_id and event.value.strip() and follow_up is not None:
+            self._run_follow_up(self.selected_job_id, event.value.strip(), follow_up)
         event.input.value = ""
 
+    @work(thread=True, exclusive=True)
+    def _run_follow_up(
+        self, job_id: str, question: str,
+        follow_up: Callable[[str, str], AnalysisResult],
+    ) -> None:
+        try:
+            result = follow_up(job_id, question)
+            rendered = "\n".join(
+                f"{claim.text} [{', '.join(claim.evidence_ids)}]"
+                for claim in result.claims
+            ) or "No supported factual claims."
+            if result.uncertainties:
+                rendered += "\nUncertainty: " + "; ".join(result.uncertainties)
+            self.app.call_from_thread(self.query_one("#events", Static).update, rendered)
+            self.app.call_from_thread(self.refresh_details)
+        except Exception:
+            self.app.call_from_thread(
+                self.query_one("#events", Static).update,
+                "Follow-up failed; check provider settings and job evidence.",
+            )
 
-def run_workbench(store: Store) -> None:
+
+def run_workbench(
+    store: Store, follow_up: Callable[[str, str], AnalysisResult]
+) -> None:
     """Run the stateful workbench for the current local workspace."""
 
-    WorkbenchApp(store).run()
+    WorkbenchApp(store, follow_up).run()
