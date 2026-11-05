@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kvedio_agent.analyze import AnalysisService
-from kvedio_agent.context import EvidenceIndex
-from kvedio_agent.storage import Store
+from kvedio_agent.pipeline.analyze import AnalysisService
+from kvedio_agent.pipeline.context import EvidenceIndex
+from kvedio_agent.platform.storage import Store
 
 
 class FakeModel:

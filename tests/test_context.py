@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kvedio_agent.context import ContextBudget, EvidenceIndex, Scratchpad
-from kvedio_agent.storage import Store
+from kvedio_agent.pipeline.context import ContextBudget, EvidenceIndex, Scratchpad
+from kvedio_agent.platform.storage import Store
 
 
 def _job(store: Store, tmp_path: Path) -> str:

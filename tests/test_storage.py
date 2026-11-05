@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from kvedio_agent.storage import Store
+from kvedio_agent.platform.storage import Store
 
 
 def _source(store: Store, tmp_path: Path) -> str:

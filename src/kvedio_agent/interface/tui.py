@@ -9,7 +9,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
 
-from kvedio_agent.storage import Store
+from kvedio_agent.platform.storage import Store
 
 
 def job_label(job: dict[str, Any]) -> str:

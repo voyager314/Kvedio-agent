@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kvedio_agent.storage import Store
-from kvedio_agent.tui import WorkbenchApp, event_lines, evidence_lines, job_label
+from kvedio_agent.interface.tui import WorkbenchApp, event_lines, evidence_lines, job_label
+from kvedio_agent.platform.storage import Store
 
 
 def test_workbench_formatters_render_durable_state(tmp_path: Path) -> None:

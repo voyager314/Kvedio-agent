@@ -6,14 +6,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from kvedio_agent.providers import (
+from kvedio_agent.platform.providers import (
     LiteLLMChat,
     OpenAICompatibleASR,
     OpenAICompatibleVision,
     ProviderError,
     _parse_transcript,
 )
-from kvedio_agent.settings import ModelEntry
+from kvedio_agent.platform.settings import ModelEntry
 
 
 def test_transcript_normalization_applies_segment_offset_and_word_timing() -> None:

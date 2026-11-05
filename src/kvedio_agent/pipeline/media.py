@@ -11,29 +11,29 @@ from typing import cast
 
 import av
 
-from kvedio_agent.config import Config
-from kvedio_agent.storage import Store
+from kvedio_agent.platform.config import Config
+from kvedio_agent.platform.storage import Store
 
 
 @dataclass(frozen=True)
 class MediaProbe:
     """Stable technical properties observed from one local source file."""
 
-    duration_ms: int
-    video_streams: int
-    audio_streams: int
-    width: int | None
-    height: int | None
-    frame_rate: float | None
+    duration_ms: int  # Container duration in milliseconds; positive.
+    video_streams: int  # Number of video streams; zero when absent.
+    audio_streams: int  # Number of audio streams; zero when absent.
+    width: int | None  # Primary video width in pixels, or None without video.
+    height: int | None  # Primary video height in pixels, or None without video.
+    frame_rate: float | None  # Primary video frames per second, or None when unknown.
 
 
 @dataclass(frozen=True)
 class SourceFingerprint:
     """File identity used to reject unsafe resume after source mutation."""
 
-    size_bytes: int
-    modified_ns: int
-    digest: str
+    size_bytes: int  # Source size in bytes; non-negative.
+    modified_ns: int  # Source modification time in filesystem nanoseconds.
+    digest: str  # Lowercase SHA-256 hex digest of the complete source file.
 
 
 def fingerprint(path: Path, block_size: int = 4 * 1024 * 1024) -> SourceFingerprint:

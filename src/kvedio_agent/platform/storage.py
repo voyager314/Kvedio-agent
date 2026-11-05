@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from kvedio_agent.settings import config_dir
+from kvedio_agent.platform.settings import config_dir
 
 _SCHEMA_VERSION = 3
 _SECRET_FIELD = re.compile(r"(^|_)(api_key|token|password|secret|authorization)(_|$)", re.I)

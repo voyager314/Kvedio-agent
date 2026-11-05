@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from kvedio_agent import settings as settings_module
-from kvedio_agent.config import Config
-from kvedio_agent.settings import ModelEntry, Settings, _strip_jsonc
+from kvedio_agent.platform import settings as settings_module
+from kvedio_agent.platform.config import Config
+from kvedio_agent.platform.settings import ModelEntry, Settings, _strip_jsonc
 
 
 def test_json_comments_preserve_urls_and_string_comment_markers() -> None:

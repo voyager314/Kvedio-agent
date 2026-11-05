@@ -8,8 +8,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import ClassVar
 
-from kvedio_agent.settings import ModelEntry
-from kvedio_agent.storage import Store
+from kvedio_agent.platform.settings import ModelEntry
+from kvedio_agent.platform.storage import Store
 
 
 @dataclass(frozen=True)

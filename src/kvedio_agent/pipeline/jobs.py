@@ -10,8 +10,8 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from kvedio_agent.providers import ProviderError
-from kvedio_agent.storage import Store
+from kvedio_agent.platform.providers import ProviderError
+from kvedio_agent.platform.storage import Store
 
 T = TypeVar("T")
 
@@ -20,20 +20,20 @@ T = TypeVar("T")
 class WorkUnit:
     """One durable, independently retryable item of stage work."""
 
-    id: str
-    start_ms: int
-    end_ms: int
-    payload: Any
+    id: str  # Durable segment identifier.
+    start_ms: int  # Source-relative start in milliseconds; non-negative.
+    end_ms: int  # Source-relative end in milliseconds; greater than start_ms.
+    payload: Any  # Stage-owned input; interpreted only by the supplied worker.
 
 
 @dataclass(frozen=True)
 class WorkResult:
     """Outcome persisted for one unit, including a safe failure category."""
 
-    unit_id: str
-    value: Any = None
-    error_category: str | None = None
-    attempts: int = 0
+    unit_id: str  # Durable segment identifier associated with this outcome.
+    value: Any = None  # Worker output, or None when the unit failed or was cancelled.
+    error_category: str | None = None  # Safe failure category, or None on success.
+    attempts: int = 0  # Number of provider attempts; zero when never submitted.
 
 
 class StageScheduler:

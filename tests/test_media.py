@@ -7,9 +7,9 @@ from pathlib import Path
 import av
 import pytest
 
-from kvedio_agent.config import Config
-from kvedio_agent.media import MediaProcessor, fingerprint, probe, validate_resume
-from kvedio_agent.storage import Store
+from kvedio_agent.pipeline.media import MediaProcessor, fingerprint, probe, validate_resume
+from kvedio_agent.platform.config import Config
+from kvedio_agent.platform.storage import Store
 
 
 @pytest.fixture

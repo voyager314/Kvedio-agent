@@ -92,16 +92,20 @@ class ModelEntry(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    model: str = Field(min_length=1)
-    api_base: str | None = None
-    api_key_env: str | None = None
-    roles: list[Role] = Field(min_length=1)
-    note: str | None = None
-    timeout_seconds: float = Field(default=120, gt=0)
-    max_attempts: int = Field(default=3, gt=0)
+    model: str = Field(min_length=1)  # Provider model identifier sent on each call.
+    api_base: str | None = None  # Provider endpoint URL, or None for SDK defaults.
+    api_key_env: str | None = None  # Environment variable name, never a secret value.
+    roles: list[Role] = Field(min_length=1)  # Allowed roles: chat, asr, and vision.
+    note: str | None = None  # User-owned non-secret label, or None when absent.
+    timeout_seconds: float = Field(default=120, gt=0)  # Positive synchronous timeout, seconds.
+    max_attempts: int = Field(default=3, gt=0)  # Positive maximum attempts for one call.
+    # Requests per minute; None is unlimited.
     requests_per_minute: int | None = Field(default=None, gt=0)
+    # USD per million input tokens; None is unknown.
     input_cost_per_million: float | None = Field(default=None, ge=0)
+    # USD per million output tokens; None is unknown.
     output_cost_per_million: float | None = Field(default=None, ge=0)
+    # USD per audio minute; None is unknown.
     audio_cost_per_minute: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="before")
@@ -124,7 +128,7 @@ class RuntimeState(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    active: dict[str, str] = Field(default_factory=dict)
+    active: dict[str, str] = Field(default_factory=dict)  # Role names to configured model keys.
 
 
 class Settings(BaseModel):
@@ -132,9 +136,9 @@ class Settings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    models: dict[str, ModelEntry] = Field(default_factory=dict)
-    active: dict[str, str] = Field(default_factory=dict)
-    runtime: dict[str, Any] = Field(default_factory=dict)
+    models: dict[str, ModelEntry] = Field(default_factory=dict)  # User-named provider connections.
+    active: dict[str, str] = Field(default_factory=dict)  # Role names to configured model keys.
+    runtime: dict[str, Any] = Field(default_factory=dict)  # Runtime parameters validated by Config.
 
     @classmethod
     def load(cls, path: Path | None = None) -> Settings:

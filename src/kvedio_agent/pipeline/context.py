@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from kvedio_agent.storage import Store
+from kvedio_agent.platform.storage import Store
 
 
 @dataclass

@@ -12,42 +12,42 @@ from typing import Any, Protocol
 import httpx
 import litellm
 
-from kvedio_agent.costs import ProviderGate, UsageReservation, call_key
-from kvedio_agent.settings import ModelEntry
+from kvedio_agent.platform.costs import ProviderGate, UsageReservation, call_key
+from kvedio_agent.platform.settings import ModelEntry
 
 
 @dataclass(frozen=True)
 class WordTiming:
     """One recognized word and its source-relative timing in milliseconds."""
 
-    text: str
-    start_ms: int
-    end_ms: int
+    text: str  # Recognized token; non-empty when emitted.
+    start_ms: int  # Source-relative start in milliseconds; non-negative.
+    end_ms: int  # Source-relative end in milliseconds; greater than start_ms.
 
 
 @dataclass(frozen=True)
 class TranscriptSegment:
     """Normalized ASR segment with optional word and speaker evidence."""
 
-    start_ms: int
-    end_ms: int
-    text: str
-    confidence: float | None = None
-    speaker_id: str | None = None
-    words: tuple[WordTiming, ...] = ()
+    start_ms: int  # Source-relative start in milliseconds; non-negative.
+    end_ms: int  # Source-relative end in milliseconds; greater than start_ms.
+    text: str  # Recognized speech; empty only when the provider emits no text.
+    confidence: float | None = None  # Provider confidence in [0, 1], or None when absent.
+    speaker_id: str | None = None  # Provider speaker label, or None when unavailable.
+    words: tuple[WordTiming, ...] = ()  # Ordered word timings; empty when not supplied.
 
 
 @dataclass(frozen=True)
 class VisualObservation:
     """Normalized observation tied to a source-relative visual interval."""
 
-    start_ms: int
-    end_ms: int
-    summary: str
-    ocr_text: str | None = None
-    confidence: float | None = None
-    frame_times_ms: tuple[int, ...] = ()
-    frame_paths: tuple[str, ...] = ()
+    start_ms: int  # Source-relative interval start in milliseconds; non-negative.
+    end_ms: int  # Source-relative interval end in milliseconds; greater than start_ms.
+    summary: str  # Provider description of the supplied visual evidence.
+    ocr_text: str | None = None  # Extracted on-screen text, or None when not supplied.
+    confidence: float | None = None  # Provider confidence in [0, 1], or None when absent.
+    frame_times_ms: tuple[int, ...] = ()  # Source-relative frame times in milliseconds.
+    frame_paths: tuple[str, ...] = ()  # Local generated frame paths; empty when unavailable.
 
 
 class ProviderError(RuntimeError):

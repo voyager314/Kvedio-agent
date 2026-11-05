@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from kvedio_agent.costs import ProviderGate
-from kvedio_agent.settings import ModelEntry
-from kvedio_agent.storage import Store
+from kvedio_agent.platform.costs import ProviderGate
+from kvedio_agent.platform.settings import ModelEntry
+from kvedio_agent.platform.storage import Store
 
 
 def _job(store: Store, tmp_path: Path) -> str:

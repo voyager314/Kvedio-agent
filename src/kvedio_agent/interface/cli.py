@@ -13,18 +13,18 @@ from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
-from kvedio_agent.analyze import AnalysisService
-from kvedio_agent.config import Config
-from kvedio_agent.context import EvidenceIndex, Scratchpad
-from kvedio_agent.costs import ProviderGate
-from kvedio_agent.jobs import StageScheduler, WorkUnit
-from kvedio_agent.media import MediaProcessor, fingerprint
-from kvedio_agent.providers import (
+from kvedio_agent.pipeline.analyze import AnalysisService
+from kvedio_agent.pipeline.context import EvidenceIndex, Scratchpad
+from kvedio_agent.pipeline.jobs import StageScheduler, WorkUnit
+from kvedio_agent.pipeline.media import MediaProcessor, fingerprint
+from kvedio_agent.platform.config import Config
+from kvedio_agent.platform.costs import ProviderGate
+from kvedio_agent.platform.providers import (
     LiteLLMChat,
     OpenAICompatibleASR,
     OpenAICompatibleVision,
 )
-from kvedio_agent.settings import (
+from kvedio_agent.platform.settings import (
     Role,
     RuntimeState,
     Settings,
@@ -33,7 +33,7 @@ from kvedio_agent.settings import (
     save_state,
     settings_path,
 )
-from kvedio_agent.storage import Store
+from kvedio_agent.platform.storage import Store
 
 app = typer.Typer(name="kvedio-agent", help="Local long-video analysis workbench")
 console = Console()
@@ -338,7 +338,7 @@ def models_command() -> None:
 def reference_command() -> None:
     """Display the packaged provider reference document."""
 
-    from kvedio_agent.settings import render_reference
+    from kvedio_agent.platform.settings import render_reference
 
     console.print(render_reference())
 
@@ -456,7 +456,7 @@ def workbench_command() -> None:
     """Open the stateful terminal workbench."""
 
     _load_settings()
-    from kvedio_agent.tui import run_workbench
+    from kvedio_agent.interface.tui import run_workbench
 
     run_workbench(store)
 

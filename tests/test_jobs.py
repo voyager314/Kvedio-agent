@@ -4,9 +4,9 @@ import threading
 import time
 from pathlib import Path
 
-from kvedio_agent.jobs import StageScheduler, WorkUnit
-from kvedio_agent.providers import ProviderError
-from kvedio_agent.storage import Store
+from kvedio_agent.pipeline.jobs import StageScheduler, WorkUnit
+from kvedio_agent.platform.providers import ProviderError
+from kvedio_agent.platform.storage import Store
 
 
 def _job(store: Store, tmp_path: Path) -> str:
