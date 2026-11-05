@@ -75,6 +75,7 @@ class StageScheduler:
         units: Iterable[WorkUnit],
         worker: Callable[[WorkUnit], T],
         on_success: Callable[[WorkUnit, T], None],
+        before_call: Callable[[WorkUnit], None] | None = None,
     ) -> list[WorkResult]:
         """Execute units concurrently and commit successful outputs via callback."""
 
@@ -90,6 +91,8 @@ class StageScheduler:
             unit_iter = iter(unit_list)
 
             def submit(unit: WorkUnit) -> None:
+                if before_call is not None:
+                    before_call(unit)
                 self.store.set_segment_status(unit.id, "running")
                 pending[pool.submit(self._run_unit, unit, worker)] = unit
 

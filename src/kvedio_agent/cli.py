@@ -16,6 +16,7 @@ from rich.table import Table
 from kvedio_agent.analyze import AnalysisService
 from kvedio_agent.config import Config
 from kvedio_agent.context import EvidenceIndex, Scratchpad
+from kvedio_agent.costs import ProviderGate
 from kvedio_agent.jobs import StageScheduler, WorkUnit
 from kvedio_agent.media import MediaProcessor, fingerprint
 from kvedio_agent.providers import (
@@ -98,11 +99,14 @@ def _model(settings: Settings, role: Role) -> tuple[str, Any] | None:
         return None
 
 
-def _chat(settings: Settings) -> LiteLLMChat:
+def _chat(settings: Settings, job_id: str | None = None) -> LiteLLMChat:
     selected = _model(settings, "chat")
     if selected is None:
         raise typer.BadParameter("Bind a chat model first with `kvedio-agent bind chat NAME`.")
-    return LiteLLMChat(selected[1], selected[1].timeout_seconds)
+    gate = None
+    if job_id is not None:
+        gate = ProviderGate(store, selected[1], Config.from_settings(settings).max_job_cost_usd)
+    return LiteLLMChat(selected[1], selected[1].timeout_seconds, gate, job_id)
 
 
 def _evidence_context(
@@ -148,7 +152,12 @@ def _evidence_context(
             ]
 
             def transcribe(unit: WorkUnit) -> Any:
-                provider = OpenAICompatibleASR(asr_entry, asr_entry.timeout_seconds)
+                provider = OpenAICompatibleASR(
+                    asr_entry,
+                    asr_entry.timeout_seconds,
+                    ProviderGate(store, asr_entry, config.max_job_cost_usd),
+                    job_id,
+                )
                 return provider.transcribe(Path(unit.payload["audio"]), unit.start_ms)
 
             def save_transcript(unit: WorkUnit, transcript: Any) -> None:
@@ -177,7 +186,12 @@ def _evidence_context(
             ]
 
             def inspect(unit: WorkUnit) -> Any:
-                provider = OpenAICompatibleVision(vision_entry, vision_entry.timeout_seconds)
+                provider = OpenAICompatibleVision(
+                    vision_entry,
+                    vision_entry.timeout_seconds,
+                    ProviderGate(store, vision_entry, config.max_job_cost_usd),
+                    job_id,
+                )
                 return provider.describe(
                     list(zip(
                         [Path(path) for path in unit.payload["keyframes"]],
@@ -198,7 +212,7 @@ def _evidence_context(
             scheduler.max_workers = config.max_vision_workers
             scheduler.run(job_id, "inspect_visuals", vision_units, inspect, save_observation)
 
-    service = AnalysisService(store, EvidenceIndex(store), _chat(settings))
+    service = AnalysisService(store, EvidenceIndex(store), _chat(settings, job_id))
     scratchpad.current_stage = "understand_segments"
     completed_ranges = set(scratchpad.completed_ranges)
     for segment in manifest["segments"]:
@@ -303,7 +317,7 @@ def _run_analysis(
         job_id, objective
     )
     result = AnalysisService(
-        store, EvidenceIndex(store), _chat(settings)
+        store, EvidenceIndex(store), _chat(settings, job_id)
     ).analyze(job_id, objective)
     store.add_message(conversation_id, "user", objective)
     evidence_ids = [item for claim in result.claims for item in claim.evidence_ids]
@@ -410,7 +424,9 @@ def ask_command(job_id: str, question: str, session_id: str | None = None) -> No
     selected = session_id or store.latest_conversation(job["id"])
     if selected is None:
         selected = store.create_conversation(job["id"], question)
-    result = AnalysisService(store, EvidenceIndex(store), _chat(settings)).follow_up(
+    result = AnalysisService(
+        store, EvidenceIndex(store), _chat(settings, job["id"])
+    ).follow_up(
         job["id"], selected, question
     )
     _render_result(result.model_dump())

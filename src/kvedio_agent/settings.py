@@ -97,6 +97,12 @@ class ModelEntry(BaseModel):
     api_key_env: str | None = None
     roles: list[Role] = Field(min_length=1)
     note: str | None = None
+    timeout_seconds: float = Field(default=120, gt=0)
+    max_attempts: int = Field(default=3, gt=0)
+    requests_per_minute: int | None = Field(default=None, gt=0)
+    input_cost_per_million: float | None = Field(default=None, ge=0)
+    output_cost_per_million: float | None = Field(default=None, ge=0)
+    audio_cost_per_minute: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="before")
     @classmethod

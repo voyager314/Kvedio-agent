@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -9,6 +10,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kvedio_agent.context import EvidenceIndex
+from kvedio_agent.costs import ProviderGate
 from kvedio_agent.providers import ProviderError
 from kvedio_agent.storage import Store
 
@@ -70,10 +72,15 @@ class TimelineChapter(BaseModel):
 class AnalysisService:
     """Create segment facts, timeline summaries, answers, and durable follow-ups."""
 
-    def __init__(self, store: Store, index: EvidenceIndex, model: TextModel) -> None:
+    def __init__(
+        self, store: Store, index: EvidenceIndex, model: TextModel,
+        gate: ProviderGate | None = None, job_id: str | None = None,
+    ) -> None:
         self.store = store
         self.index = index
         self.model = model
+        self.gate = gate
+        self.job_id = job_id
 
     def understand_segment(
         self, job_id: str, start_ms: int, end_ms: int, retention_days: int = 30
@@ -86,7 +93,7 @@ class AnalysisService:
         prompt = _json_prompt(
             "Extract key facts, entities, and uncertainty from this bounded evidence.", evidence
         )
-        data = _parse_json(self.model.complete(_SEGMENT_SYSTEM, prompt))
+        data = _parse_json(self._complete("segment", prompt))
         fact = SegmentFact(
             start_ms=start_ms,
             end_ms=end_ms,
@@ -126,10 +133,8 @@ class AnalysisService:
         summaries = self.store.evidence_for_modality(job_id, "segment_summary")
         if not summaries:
             return []
-        response = self.model.complete(
-            _TIMELINE_SYSTEM,
-            _json_prompt("Create chronological chapters and key moments.", summaries),
-        )
+        prompt = _json_prompt("Create chronological chapters and key moments.", summaries)
+        response = self._complete("timeline", prompt)
         data = _parse_json(response)
         raw_chapters = data.get("chapters", [])
         if not isinstance(raw_chapters, list):
@@ -161,10 +166,8 @@ class AnalysisService:
         context.sort(key=lambda item: (item["start_ms"], item["end_ms"]))
         if not context:
             raise ValueError("no matching evidence is available")
-        response = self.model.complete(
-            _ANSWER_SYSTEM,
-            _json_prompt(objective, context),
-        )
+        prompt = _json_prompt(objective, context)
+        response = self._complete("answer", prompt)
         try:
             result = AnalysisResult.model_validate(_parse_json(response))
         except (ValidationError, ValueError):
@@ -187,7 +190,7 @@ class AnalysisService:
         history = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
         prompt = f"Conversation so far:\n{history}\n\nNew question: {question}\n\nEvidence:\n"
         prompt += _format_evidence(context)
-        response = self.model.complete(_ANSWER_SYSTEM, prompt)
+        response = self._complete("follow_up", prompt)
         try:
             result = AnalysisResult.model_validate(_parse_json(response))
         except (ValidationError, ValueError):
@@ -200,6 +203,25 @@ class AnalysisService:
             raise ProviderError("analysis_invalid_citation", retryable=False)
         self.store.add_message(conversation_id, "assistant", result.model_dump_json(), evidence_ids)
         return result
+
+    def _complete(self, stage: str, prompt: str) -> str:
+        if self.gate is None or self.job_id is None:
+            return self.model.complete(_system_prompt(stage), prompt)
+        model_name = getattr(self.model, "model", "chat")
+        prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        reservation = self.gate.reserve(
+            self.job_id,
+            stage,
+            f"{stage}:{prompt_digest}:{model_name}",
+            self.gate.estimate_chat(len(prompt.encode("utf-8"))),
+        )
+        try:
+            response = self.model.complete(_system_prompt(stage), prompt)
+        except Exception:
+            self.gate.settle(reservation, None, failed=True)
+            raise
+        self.gate.settle(reservation, None)
+        return response
 
 
 _SEGMENT_SYSTEM = (
@@ -214,6 +236,15 @@ _ANSWER_SYSTEM = (
     "Answer using only supplied evidence. Return JSON with objective, plan, claims, "
     "uncertainties, and quality_assessment. Each claim must cite supplied evidence IDs."
 )
+
+
+def _system_prompt(stage: str) -> str:
+    return {
+        "segment": _SEGMENT_SYSTEM,
+        "timeline": _TIMELINE_SYSTEM,
+        "answer": _ANSWER_SYSTEM,
+        "follow_up": _ANSWER_SYSTEM,
+    }[stage]
 
 
 def _format_evidence(items: list[dict[str, Any]]) -> str:

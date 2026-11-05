@@ -19,6 +19,7 @@ class Config(BaseModel):
     max_media_workers: int = Field(default=2, gt=0)
     max_asr_workers: int = Field(default=4, gt=0)
     max_vision_workers: int = Field(default=2, gt=0)
+    max_job_cost_usd: float | None = Field(default=None, ge=0)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Config:

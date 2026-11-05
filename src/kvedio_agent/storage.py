@@ -16,7 +16,7 @@ from typing import Any
 
 from kvedio_agent.settings import config_dir
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 3
 _SECRET_FIELD = re.compile(r"(^|_)(api_key|token|password|secret|authorization)(_|$)", re.I)
 
 
@@ -62,6 +62,11 @@ class Store:
             )
             connection.execute(
                 "UPDATE segments SET status='pending' WHERE status='running'"
+            )
+            connection.execute(
+                "UPDATE usage_records SET status='uncertain', finished_at=? "
+                "WHERE status='reserved'",
+                (now,),
             )
         return jobs
 
@@ -191,8 +196,76 @@ class Store:
                         created_at TEXT NOT NULL
                     );
                     CREATE INDEX job_events_order ON job_events(job_id, created_at);
+                    CREATE TABLE usage_records (
+                        id TEXT PRIMARY KEY,
+                        job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                        stage TEXT NOT NULL,
+                        provider TEXT NOT NULL,
+                        call_key TEXT NOT NULL,
+                        attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt > 0),
+                        status TEXT NOT NULL,
+                        estimated_cost_usd REAL CHECK (
+                            estimated_cost_usd IS NULL OR estimated_cost_usd >= 0
+                        ),
+                        actual_cost_usd REAL CHECK (
+                            actual_cost_usd IS NULL OR actual_cost_usd >= 0
+                        ),
+                        input_tokens INTEGER,
+                        output_tokens INTEGER,
+                        audio_seconds REAL,
+                        created_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        UNIQUE(job_id, provider, call_key)
+                    );
+                    CREATE INDEX usage_job_cost ON usage_records(job_id, status);
                     INSERT INTO schema_version(version, applied_at)
-                    VALUES (1, CURRENT_TIMESTAMP);
+                    VALUES (3, CURRENT_TIMESTAMP);
+                    """
+                )
+                version = 3
+            if version == 2:
+                columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(usage_records)").fetchall()
+                }
+                if "attempt" not in columns:
+                    connection.execute(
+                        "ALTER TABLE usage_records ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1"
+                    )
+                connection.execute(
+                    "INSERT INTO schema_version(version, applied_at) VALUES (3, CURRENT_TIMESTAMP)"
+                )
+            if version == 1:
+                connection.executescript(
+                    """
+                    CREATE TABLE usage_records (
+                        id TEXT PRIMARY KEY,
+                        job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                        stage TEXT NOT NULL,
+                        provider TEXT NOT NULL,
+                        call_key TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        estimated_cost_usd REAL,
+                        actual_cost_usd REAL,
+                        input_tokens INTEGER,
+                        output_tokens INTEGER,
+                        audio_seconds REAL,
+                        created_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        UNIQUE(job_id, provider, call_key)
+                    );
+                    CREATE INDEX usage_job_cost ON usage_records(job_id, status);
+                    INSERT INTO schema_version(version, applied_at)
+                    VALUES (2, CURRENT_TIMESTAMP);
+                    """
+                )
+                version = 2
+            if version == 2:
+                connection.executescript(
+                    """
+                    ALTER TABLE usage_records ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1;
+                    INSERT INTO schema_version(version, applied_at)
+                    VALUES (3, CURRENT_TIMESTAMP);
                     """
                 )
 
@@ -464,6 +537,105 @@ class Store:
                 (event_id, job_id, stage_id, kind, message, _json(payload), _timestamp()),
             )
         return event_id
+
+    def reserve_usage(
+        self,
+        job_id: str,
+        stage: str,
+        provider: str,
+        call_key: str,
+        estimated_cost_usd: float | None,
+        max_job_cost_usd: float | None,
+    ) -> tuple[str, str | None, bool]:
+        """Reserve estimated call cost before dispatch, rejecting unknown cost under a ceiling."""
+
+        usage_id = str(uuid.uuid4())
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT id, status, attempt FROM usage_records WHERE job_id=? AND provider=? "
+                "AND (call_key=? OR call_key LIKE ?) ORDER BY attempt DESC LIMIT 1",
+                (job_id, provider, call_key, f"{call_key}:retry:%"),
+            ).fetchone()
+            if existing:
+                if existing["status"] == "completed":
+                    raise ValueError(
+                        "provider call is already complete; expected cached output evidence"
+                    )
+                if existing["status"] == "uncertain":
+                    raise ValueError(
+                        "provider call outcome is uncertain; refusing duplicate dispatch"
+                    )
+                if existing["status"] != "retryable_failed":
+                    raise ValueError(
+                        "provider call already has a durable outcome; refusing duplicate dispatch"
+                    )
+                attempt = int(existing["attempt"]) + 1
+                call_key = f"{call_key}:retry:{attempt}"
+            else:
+                attempt = 1
+            if max_job_cost_usd is not None:
+                if estimated_cost_usd is None:
+                    raise ValueError(
+                        "call cost is unknown; configure pricing before enabling a budget"
+                    )
+                row = connection.execute(
+                    """SELECT COALESCE(
+                           SUM(COALESCE(actual_cost_usd, estimated_cost_usd)), 0
+                       ) AS cost FROM usage_records WHERE job_id=?""",
+                    (job_id,),
+                ).fetchone()
+                if row["cost"] + estimated_cost_usd > max_job_cost_usd:
+                    raise ValueError("job spend ceiling would be exceeded")
+            connection.execute(
+                """INSERT INTO usage_records
+                   (id, job_id, stage, provider, call_key, attempt, status,
+                    estimated_cost_usd, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?)""",
+                (usage_id, job_id, stage, provider, call_key, attempt,
+                 estimated_cost_usd, _timestamp()),
+            )
+        return usage_id, None, False
+
+    def finish_usage(
+        self,
+        usage_id: str,
+        actual_cost_usd: float | None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        audio_seconds: float | None = None,
+        failed: bool = False,
+        retryable: bool = False,
+    ) -> None:
+        """Settle usage or retain its reservation as uncertain after a failed call."""
+
+        status = (
+            "retryable_failed" if failed and retryable
+            else "uncertain" if failed
+            else "completed"
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE usage_records SET status=?, actual_cost_usd=?, input_tokens=?,
+                   output_tokens=?, audio_seconds=?, finished_at=? WHERE id=?""",
+                (status, actual_cost_usd, input_tokens, output_tokens, audio_seconds,
+                 _timestamp(), usage_id),
+            )
+
+    def usage_summary(self, job_id: str) -> dict[str, Any]:
+        """Summarize known cost and unknown-cost calls without treating unknown as zero."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) AS calls,
+                   SUM(CASE WHEN status='uncertain' OR
+                       (actual_cost_usd IS NULL AND estimated_cost_usd IS NULL)
+                       THEN 1 ELSE 0 END) AS unknown_calls,
+                   SUM(COALESCE(actual_cost_usd, estimated_cost_usd)) AS known_cost_usd
+                   FROM usage_records WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+        return dict(row)
 
     def recoverable_jobs(self) -> list[dict[str, Any]]:
         """Return jobs whose work can continue after process restart."""

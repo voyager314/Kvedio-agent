@@ -8,7 +8,8 @@
     "segment_overlap_seconds": 2,
     "max_media_workers": 2,
     "max_asr_workers": 4,
-    "max_vision_workers": 2
+    "max_vision_workers": 2,
+    "max_job_cost_usd": null
   }
 }
 
