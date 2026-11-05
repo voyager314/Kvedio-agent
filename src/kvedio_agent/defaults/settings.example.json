@@ -1,0 +1,14 @@
+{
+  "models": {},
+  "active": {},
+  "runtime": {
+    "max_video_duration_seconds": 7200,
+    "retention_days": 30,
+    "max_segment_duration_seconds": 120,
+    "segment_overlap_seconds": 2,
+    "max_media_workers": 2,
+    "max_asr_workers": 4,
+    "max_vision_workers": 2
+  }
+}
+
