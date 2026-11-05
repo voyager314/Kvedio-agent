@@ -8,6 +8,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from typing import ClassVar
+from weakref import WeakValueDictionary
 
 from kvedio_agent.platform.settings import ModelEntry
 from kvedio_agent.platform.storage import Store
@@ -17,6 +18,14 @@ class BudgetExceededError(ValueError):
     """Non-retryable reservation rejection caused by an enabled spend ceiling."""
 
     category = "budget_exceeded"
+
+
+@dataclass
+class _RateWindow:
+    """Shared pacing state retained only while a gate uses the model."""
+
+    lock: threading.Lock
+    calls: deque[float]
 
 
 @dataclass(frozen=True)
@@ -30,7 +39,7 @@ class UsageReservation:
 class ProviderGate:
     """Pace one model and reserve estimated job cost before external dispatch."""
 
-    _rate_locks: ClassVar[dict[str, tuple[threading.Lock, deque[float]]]] = {}
+    _rate_locks: ClassVar[WeakValueDictionary[str, _RateWindow]] = WeakValueDictionary()
     _rate_registry_lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(self, store: Store, model: ModelEntry, max_job_cost_usd: float | None) -> None:
@@ -38,9 +47,11 @@ class ProviderGate:
         self.model = model
         self.max_job_cost_usd = max_job_cost_usd
         with self._rate_registry_lock:
-            if model.model not in self._rate_locks:
-                self._rate_locks[model.model] = (threading.Lock(), deque())
-            self._lock, self._calls = self._rate_locks[model.model]
+            window = self._rate_locks.get(model.model)
+            if window is None:
+                window = _RateWindow(threading.Lock(), deque())
+                self._rate_locks[model.model] = window
+            self._rate_window = window
 
     def reserve(
         self, job_id: str, stage: str, call_key: str, estimate: float | None
@@ -130,14 +141,15 @@ class ProviderGate:
         if limit is None:
             return
         while True:
-            with self._lock:
+            with self._rate_window.lock:
                 now = time.monotonic()
-                while self._calls and now - self._calls[0] >= 60:
-                    self._calls.popleft()
-                if len(self._calls) < limit:
-                    self._calls.append(now)
+                calls = self._rate_window.calls
+                while calls and now - calls[0] >= 60:
+                    calls.popleft()
+                if len(calls) < limit:
+                    calls.append(now)
                     return
-                delay = max(0.01, 60 - (now - self._calls[0]))
+                delay = max(0.01, 60 - (now - calls[0]))
             time.sleep(delay)
 
 

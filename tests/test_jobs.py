@@ -109,3 +109,49 @@ def test_segment_stays_retryable_when_output_commit_fails(tmp_path: Path) -> Non
     assert store.job_events(job_id)[-1]["data_json"].find(
         "stage_output_commit_failed"
     ) >= 0
+
+
+def test_retry_backoff_releases_worker_for_another_unit(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    job_id = _job(store, tmp_path)
+    units = [
+        WorkUnit(store.add_segment(job_id, "asr", i * 1000, (i + 1) * 1000),
+                 i * 1000, (i + 1) * 1000, i)
+        for i in range(2)
+    ]
+    second_started = threading.Event()
+    first_calls = 0
+
+    def worker(unit: WorkUnit) -> str:
+        nonlocal first_calls
+        if unit.payload == 0:
+            first_calls += 1
+            if first_calls == 1:
+                raise ProviderError("temporary", retryable=True)
+            return "retried"
+        second_started.set()
+        return "second"
+
+    scheduler = StageScheduler(store, 1, base_delay_seconds=0.3, seed=1)
+    scheduler.run(job_id, "asr", units, worker, lambda unit, value: None)
+    assert second_started.is_set()
+    assert first_calls == 2
+
+
+def test_run_attempt_limit_overrides_scheduler_default(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    job_id = _job(store, tmp_path)
+    segment = store.add_segment(job_id, "asr", 0, 1000)
+    calls = 0
+
+    def worker(unit: WorkUnit) -> None:
+        nonlocal calls
+        calls += 1
+        raise ProviderError("temporary", retryable=True)
+
+    scheduler = StageScheduler(store, 1, max_attempts=5, base_delay_seconds=0)
+    result = scheduler.run(
+        job_id, "asr", [WorkUnit(segment, 0, 1000, None)], worker,
+        lambda unit, value: None, max_attempts=2,
+    )[0]
+    assert calls == result.attempts == 2

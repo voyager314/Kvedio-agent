@@ -132,7 +132,7 @@ def _evidence_context(
     asr_entry = asr_binding[1] if asr_binding else None
     vision_entry = vision_binding[1] if vision_binding else None
     total = len(manifest["segments"])
-    scheduler = StageScheduler(store, config.max_asr_workers, max_attempts=3)
+    scheduler = StageScheduler(store, config.max_global_workers)
     modality_count = int(asr_entry is not None) + int(vision_entry is not None)
     with Progress(
         SpinnerColumn(), TextColumn("{task.description}"), BarColumn(),
@@ -173,7 +173,11 @@ def _evidence_context(
                         f"Milestone: {int(progress.tasks[0].completed)} work units complete"
                     )
 
-            scheduler.run(job_id, "transcribe", asr_units, transcribe, save_transcript)
+            scheduler.run(
+                job_id, "transcribe", asr_units, transcribe, save_transcript,
+                max_workers=min(config.max_asr_workers, config.max_global_workers),
+                max_attempts=asr_entry.max_attempts,
+            )
 
         if vision_entry:
             vision_units = [
@@ -209,8 +213,11 @@ def _evidence_context(
                 )
                 progress.advance(task_id)
 
-            scheduler.max_workers = config.max_vision_workers
-            scheduler.run(job_id, "inspect_visuals", vision_units, inspect, save_observation)
+            scheduler.run(
+                job_id, "inspect_visuals", vision_units, inspect, save_observation,
+                max_workers=min(config.max_vision_workers, config.max_global_workers),
+                max_attempts=vision_entry.max_attempts,
+            )
 
     service = AnalysisService(store, EvidenceIndex(store), _chat(settings, job_id))
     scratchpad.current_stage = "understand_segments"

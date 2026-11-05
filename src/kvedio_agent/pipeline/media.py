@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -123,6 +124,7 @@ class MediaProcessor:
         self.store.set_job_status(job_id, "running", "preprocess")
         segment_ms = self.config.max_segment_duration_seconds * 1000
         overlap_ms = self.config.segment_overlap_seconds * 1000
+        specs: list[tuple[str, int, int, Path, list[Path]]] = []
         start = 0
         while start < media.duration_ms:
             end = min(start + segment_ms, media.duration_ms)
@@ -132,11 +134,27 @@ class MediaProcessor:
                 output_dir / f"{start:012d}-{end:012d}-{index}.jpg"
                 for index in range(3)
             ]
+            specs.append((segment_id, start, end, audio_path, frame_paths))
+            if end == media.duration_ms:
+                break
+            start = end - overlap_ms
+
+        def generate(spec: tuple[str, int, int, Path, list[Path]]) -> list[int]:
+            _, start_ms, end_ms, audio_path, frame_paths = spec
             if not audio_path.exists() and media.audio_streams:
-                self._write_audio(source, start, end, audio_path)
-            frame_times = []
+                self._write_audio(source, start_ms, end_ms, audio_path)
             if media.video_streams:
-                frame_times = self._write_keyframes(source, start, end, frame_paths)
+                return self._write_keyframes(source, start_ms, end_ms, frame_paths)
+            return []
+
+        with ThreadPoolExecutor(max_workers=self.config.max_media_workers) as pool:
+            frame_times_by_id = {
+                spec[0]: frame_times
+                for spec, frame_times in zip(specs, pool.map(generate, specs))
+            }
+
+        for segment_id, start, end, audio_path, frame_paths in specs:
+            frame_times = frame_times_by_id[segment_id]
             artifact_id = None
             generated = [("audio", audio_path)] + [
                 ("keyframe", path) for path in frame_paths if path.exists()
@@ -161,9 +179,6 @@ class MediaProcessor:
             temporary_manifest = manifest_path.with_suffix(".tmp")
             temporary_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
             temporary_manifest.replace(manifest_path)
-            if end == media.duration_ms:
-                break
-            start = end - overlap_ms
         self.store.upsert_stage(job_id, "preprocess", "completed", progress=1)
         return source_id, job_id, media
 

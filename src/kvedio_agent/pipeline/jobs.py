@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import random
 import threading
 import time
@@ -10,6 +11,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+from kvedio_agent.platform.costs import BudgetExceededError
 from kvedio_agent.platform.providers import ProviderError
 from kvedio_agent.platform.storage import Store
 
@@ -34,6 +36,7 @@ class WorkResult:
     value: Any = None  # Worker output, or None when the unit failed or was cancelled.
     error_category: str | None = None  # Safe failure category, or None on success.
     attempts: int = 0  # Number of provider attempts; zero when never submitted.
+    retryable: bool = False  # True only when a provider failure may be retried.
 
 
 class StageScheduler:
@@ -76,43 +79,91 @@ class StageScheduler:
         worker: Callable[[WorkUnit], T],
         on_success: Callable[[WorkUnit, T], None],
         before_call: Callable[[WorkUnit], None] | None = None,
+        max_workers: int | None = None,
+        max_attempts: int | None = None,
     ) -> list[WorkResult]:
         """Execute units concurrently and commit successful outputs via callback."""
 
         unit_list = list(units)
         if not unit_list:
             return []
+        worker_limit = max_workers or self.max_workers
+        attempt_limit = max_attempts or self.max_attempts
+        if worker_limit < 1 or attempt_limit < 1:
+            raise ValueError("worker and attempt limits must be positive")
         stage_id = self.store.upsert_stage(job_id, stage_name, "running")
         raw_results: list[WorkResult] = []
         with ThreadPoolExecutor(
-            max_workers=self.max_workers, thread_name_prefix="kvedio-stage"
+            max_workers=worker_limit, thread_name_prefix="kvedio-stage"
         ) as pool:
             pending: dict[Future[WorkResult], WorkUnit] = {}
-            unit_iter = iter(unit_list)
+            attempts: dict[str, int] = {unit.id: 0 for unit in unit_list}
+            ready = iter(unit_list)
+            delayed: list[tuple[float, int, WorkUnit]] = []
+            sequence = 0
 
             def submit(unit: WorkUnit) -> None:
                 if before_call is not None:
                     before_call(unit)
                 self.store.set_segment_status(unit.id, "running")
-                pending[pool.submit(self._run_unit, unit, worker)] = unit
+                attempts[unit.id] += 1
+                pending[pool.submit(self._run_unit, unit, worker, attempts[unit.id])] = unit
 
-            for _ in range(min(self.max_workers, len(unit_list))):
+            for _ in range(min(worker_limit, len(unit_list))):
                 if self._cancel.is_set():
                     break
-                unit = next(unit_iter)
+                unit = next(ready)
                 submit(unit)
-            while pending:
-                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            exhausted = len(unit_list) <= worker_limit
+            while pending or delayed or not exhausted:
+                if self._cancel.is_set():
+                    exhausted = True
+                    delayed.clear()
+                now = time.monotonic()
+                while delayed and delayed[0][0] <= now and len(pending) < worker_limit:
+                    _, _, unit = heapq.heappop(delayed)
+                    if not self._cancel.is_set():
+                        submit(unit)
+                while not exhausted and not self._cancel.is_set() and len(pending) < worker_limit:
+                    try:
+                        submit(next(ready))
+                    except StopIteration:
+                        exhausted = True
+                if not pending:
+                    if delayed:
+                        self._cancel.wait(max(0, delayed[0][0] - time.monotonic()))
+                    continue
+                timeout = max(0, delayed[0][0] - time.monotonic()) if delayed else None
+                completed, _ = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
                 for future in completed:
                     unit = pending.pop(future)
                     result = future.result()
-                    raw_results.append(result)
-                    try:
-                        next_unit = next(unit_iter)
-                    except StopIteration:
+                    if (
+                        result.retryable
+                        and attempts[unit.id] < attempt_limit
+                        and not self._cancel.is_set()
+                    ):
+                        delay = min(
+                            self.base_delay_seconds * (2 ** (attempts[unit.id] - 1)),
+                            self.max_delay_seconds,
+                        )
+                        sequence += 1
+                        heapq.heappush(
+                            delayed,
+                            (time.monotonic() + self._random.uniform(delay * 0.75, delay * 1.25),
+                             sequence, unit),
+                        )
                         continue
-                    if not self._cancel.is_set():
-                        submit(next_unit)
+                    if result.retryable:
+                        result = WorkResult(
+                            result.unit_id, error_category=result.error_category,
+                            attempts=result.attempts,
+                        )
+                    raw_results.append(result)
+            for _, _, unit in delayed:
+                raw_results.append(
+                    WorkResult(unit.id, error_category="cancelled", attempts=attempts[unit.id])
+                )
         start_by_id = {unit.id: unit.start_ms for unit in unit_list}
         ordered = sorted(raw_results, key=lambda result: start_by_id[result.unit_id])
         unit_by_id = {unit.id: unit for unit in unit_list}
@@ -165,19 +216,19 @@ class StageScheduler:
         )
         return committed_results
 
-    def _run_unit(self, unit: WorkUnit, worker: Callable[[WorkUnit], T]) -> WorkResult:
-        attempts = 0
-        while attempts < self.max_attempts and not self._cancel.is_set():
-            attempts += 1
-            try:
-                return WorkResult(unit.id, worker(unit), attempts=attempts)
-            except ProviderError as exc:
-                if not exc.retryable:
-                    return WorkResult(unit.id, error_category=exc.category, attempts=attempts)
-                if attempts >= self.max_attempts:
-                    return WorkResult(unit.id, error_category=exc.category, attempts=attempts)
-            except Exception:
-                return WorkResult(unit.id, error_category="stage_internal_error", attempts=attempts)
-            delay = min(self.base_delay_seconds * (2 ** (attempts - 1)), self.max_delay_seconds)
-            time.sleep(self._random.uniform(delay * 0.75, delay * 1.25))
-        return WorkResult(unit.id, error_category="cancelled", attempts=attempts)
+    def _run_unit(
+        self, unit: WorkUnit, worker: Callable[[WorkUnit], T], attempts: int
+    ) -> WorkResult:
+        if self._cancel.is_set():
+            return WorkResult(unit.id, error_category="cancelled", attempts=attempts - 1)
+        try:
+            return WorkResult(unit.id, worker(unit), attempts=attempts)
+        except ProviderError as exc:
+            return WorkResult(
+                unit.id, error_category=exc.category, attempts=attempts,
+                retryable=exc.retryable,
+            )
+        except BudgetExceededError as exc:
+            return WorkResult(unit.id, error_category=exc.category, attempts=attempts)
+        except Exception:
+            return WorkResult(unit.id, error_category="stage_internal_error", attempts=attempts)
