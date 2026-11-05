@@ -461,6 +461,53 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def search_evidence(
+        self, job_id: str, query_terms: list[str], limit: int
+    ) -> list[dict[str, Any]]:
+        """Return text evidence matching any query term in source-time order."""
+
+        terms = [term.strip() for term in query_terms if term.strip()]
+        if not terms or limit <= 0:
+            return []
+        clauses = " OR ".join("content LIKE ?" for _ in terms)
+        parameters: list[Any] = [job_id, *(f"%{term}%" for term in terms), limit]
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM evidence WHERE job_id=? AND content IS NOT NULL AND ({clauses}) "
+                "ORDER BY start_ms, end_ms LIMIT ?",
+                parameters,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def checkpoint(self, job_id: str) -> dict[str, Any] | None:
+        """Restore the persisted structured scratchpad for a job."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT scratchpad_json FROM checkpoints WHERE job_id=?", (job_id,)
+            ).fetchone()
+        return json.loads(row["scratchpad_json"]) if row else None
+
+    def add_artifact_summary(
+        self, job_id: str, kind: str, start_ms: int, end_ms: int, summary: str,
+        producer: str, retention_days: int,
+    ) -> str:
+        """Store a generated text summary as an artifact and searchable evidence."""
+
+        artifact_dir = self.root / "artifacts" / job_id / "summaries"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        digest = __import__("hashlib").sha256(summary.encode("utf-8")).hexdigest()
+        path = artifact_dir / f"{kind}-{start_ms}-{end_ms}-{digest[:12]}.txt"
+        if not path.exists():
+            path.write_text(summary, encoding="utf-8")
+        artifact_id = self.add_artifact(
+            job_id, kind, path, digest, producer, retention_days
+        )
+        evidence_id = self.add_evidence(
+            job_id, kind, start_ms, end_ms, {"producer": producer}, summary, artifact_id
+        )
+        return evidence_id
+
     def cleanup_expired(self, retention_days: int, now: datetime | None = None) -> int:
         """Remove expired generated artifacts and old jobs, never source videos."""
 
