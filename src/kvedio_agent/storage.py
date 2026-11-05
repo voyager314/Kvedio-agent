@@ -255,6 +255,28 @@ class Store:
                 (status, artifact_id, segment_id),
             )
 
+    def pending_segments(self, job_id: str, kind: str) -> list[dict[str, Any]]:
+        """Return work units not yet completed for one processing kind."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM segments WHERE job_id=? AND kind=? AND status!='completed' "
+                "ORDER BY start_ms, end_ms",
+                (job_id, kind),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def evidence_exists(self, job_id: str, modality: str, start_ms: int, end_ms: int) -> bool:
+        """Check whether a normalized result for the exact work range is stored."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM evidence WHERE job_id=? AND modality=? "
+                "AND start_ms=? AND end_ms=? LIMIT 1",
+                (job_id, modality, start_ms, end_ms),
+            ).fetchone()
+        return row is not None
+
     def upsert_stage(self, job_id: str, name: str, status: str, attempt: int = 0,
                      progress: float = 0, error_category: str | None = None) -> str:
         """Persist stage progress without storing raw exception details."""
