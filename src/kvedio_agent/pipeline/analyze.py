@@ -11,14 +11,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kvedio_agent.pipeline.context import EvidenceIndex
 from kvedio_agent.platform.costs import ProviderGate
-from kvedio_agent.platform.providers import ProviderError
+from kvedio_agent.platform.providers import Completion, ProviderError
 from kvedio_agent.platform.storage import Store
 
 
 class TextModel(Protocol):
     """Small text generation surface required by the analysis workflow."""
 
-    def complete(self, system: str, prompt: str) -> str: ...
+    def complete(self, system: str, prompt: str) -> Completion: ...
 
 
 class ConclusionClaim(BaseModel):
@@ -206,22 +206,25 @@ class AnalysisService:
 
     def _complete(self, stage: str, prompt: str) -> str:
         if self.gate is None or self.job_id is None:
-            return self.model.complete(_system_prompt(stage), prompt)
+            return self.model.complete(_system_prompt(stage), prompt).content
         model_name = getattr(self.model, "model", "chat")
         prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         reservation = self.gate.reserve(
             self.job_id,
             stage,
             f"{stage}:{prompt_digest}:{model_name}",
-            self.gate.estimate_chat(len(prompt.encode("utf-8"))),
+            self.gate.estimate_chat(_system_prompt(stage) + "\n" + prompt, output_tokens=2048),
         )
         try:
             response = self.model.complete(_system_prompt(stage), prompt)
         except Exception:
             self.gate.settle(reservation, None, failed=True)
             raise
-        self.gate.settle(reservation, None)
-        return response
+        self.gate.settle(
+            reservation, response.actual_cost_usd,
+            response.input_tokens, response.output_tokens,
+        )
+        return response.content
 
 
 _SEGMENT_SYSTEM = (

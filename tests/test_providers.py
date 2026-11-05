@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from kvedio_agent.platform.providers import (
+    Completion,
     LiteLLMChat,
     OpenAICompatibleASR,
     OpenAICompatibleVision,
@@ -68,6 +69,34 @@ def test_chat_adapter_suppresses_raw_exception_and_secret(
         adapter.complete("system", "prompt")
     assert "sentinel-secret" not in str(raised.value)
     assert raised.value.__cause__ is None
+
+
+def test_chat_completion_returns_provider_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHAT_TOKEN", "chat-secret")
+    model = ModelEntry(
+        model="provider/model", api_key_env="CHAT_TOKEN", roles=["chat"],
+        input_cost_per_million=1, output_cost_per_million=2,
+    )
+
+    class Usage:
+        prompt_tokens = 12
+        completion_tokens = 7
+
+    class Message:
+        content = "answer"
+
+    class Response:
+        choices = [type("Choice", (), {"message": Message()})()]
+        usage = Usage()
+        model = "resolved/model"
+
+    monkeypatch.setattr("litellm.completion", lambda **kwargs: Response())
+    result = LiteLLMChat(model).complete("system", "prompt")
+    assert isinstance(result, Completion)
+    assert result.model == "resolved/model"
+    assert result.input_tokens == 12
+    assert result.output_tokens == 7
+    assert result.actual_cost_usd == pytest.approx(0.000026)
 
 
 def test_visual_observation_preserves_frame_source_timestamps(

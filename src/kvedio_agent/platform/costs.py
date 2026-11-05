@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
@@ -10,6 +11,12 @@ from typing import ClassVar
 
 from kvedio_agent.platform.settings import ModelEntry
 from kvedio_agent.platform.storage import Store
+
+
+class BudgetExceededError(ValueError):
+    """Non-retryable reservation rejection caused by an enabled spend ceiling."""
+
+    category = "budget_exceeded"
 
 
 @dataclass(frozen=True)
@@ -40,14 +47,19 @@ class ProviderGate:
     ) -> UsageReservation:
         """Wait for the model rate window, then reserve estimated cost durably."""
 
-        usage_id, existing_status, _ = self.store.reserve_usage(
-            job_id,
-            stage,
-            self.model.model,
-            call_key,
-            estimate,
-            self.max_job_cost_usd,
-        )
+        try:
+            usage_id, existing_status, _ = self.store.reserve_usage(
+                job_id,
+                stage,
+                self.model.model,
+                call_key,
+                estimate,
+                self.max_job_cost_usd,
+            )
+        except ValueError as exc:
+            if "ceiling" in str(exc) or "cost is unknown" in str(exc):
+                raise BudgetExceededError(str(exc)) from None
+            raise
         if existing_status == "completed":
             raise ValueError("provider call is already complete; expected cached output evidence")
         if self.model.requests_per_minute:
@@ -81,14 +93,37 @@ class ProviderGate:
             return None
         return duration_seconds / 60 * self.model.audio_cost_per_minute
 
-    def estimate_chat(self, input_bytes: int, output_tokens: int = 1024) -> float | None:
+    def estimate_chat(self, text: str, output_tokens: int = 1024) -> float | None:
         if self.model.input_cost_per_million is None or self.model.output_cost_per_million is None:
             return None
-        input_tokens = input_bytes // 4
+        try:
+            import litellm
+
+            input_tokens = litellm.token_counter(model=self.model.model, text=text)
+        except Exception:
+            cjk = sum(
+                "\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff"
+                for char in text
+            )
+            input_tokens = math.ceil(cjk + (len(text) - cjk) / 3)
+        input_tokens = math.ceil(input_tokens * 1.2)
         return (
             input_tokens * self.model.input_cost_per_million
             + output_tokens * self.model.output_cost_per_million
         ) / 1_000_000
+
+    def estimate_vision(
+        self, prompt: str, frame_count: int, output_tokens: int = 1024
+    ) -> float | None:
+        if frame_count < 0:
+            raise ValueError("frame count cannot be negative")
+        if self.model.input_cost_per_million is None or self.model.output_cost_per_million is None:
+            return None
+        text_cost = self.estimate_chat(prompt, output_tokens=0)
+        image_tokens = math.ceil(frame_count * 1500 * 1.2)
+        image_cost = image_tokens * self.model.input_cost_per_million / 1_000_000
+        output_cost = output_tokens * self.model.output_cost_per_million / 1_000_000
+        return (text_cost or 0) + image_cost + output_cost
 
     def _wait_for_rate(self) -> None:
         limit = self.model.requests_per_minute

@@ -32,7 +32,7 @@ def test_cost_reservation_and_settlement_are_idempotent(tmp_path: Path) -> None:
     )
     gate = ProviderGate(store, model, max_job_cost_usd=1)
     job_id = _job(store, tmp_path)
-    estimate = gate.estimate_chat(4000, 1000)
+    estimate = gate.estimate_chat("x" * 4000, 1000)
     reservation = gate.reserve(job_id, "chat", "question-1", estimate)
     gate.settle(reservation, 0.002, input_tokens=1000, output_tokens=500)
     with pytest.raises(ValueError, match="already complete"):
@@ -70,3 +70,45 @@ def test_retryable_failure_creates_a_new_attempt(tmp_path: Path) -> None:
     second = gate.reserve(job_id, "chat", "retry-call", 0.1)
     gate.settle(second, 0.1)
     assert store.usage_summary(job_id)["calls"] == 2
+
+
+def test_text_estimate_uses_token_counter_with_conservative_factor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store = Store(tmp_path / "workspace")
+    model = ModelEntry(
+        model="provider/model", roles=["chat"], input_cost_per_million=1,
+        output_cost_per_million=2,
+    )
+    monkeypatch.setattr("litellm.token_counter", lambda **kwargs: 100)
+    gate = ProviderGate(store, model, None)
+    assert gate.estimate_chat("hello", output_tokens=50) == pytest.approx(0.00022)
+
+
+def test_text_estimate_falls_back_for_cjk_and_vision_scales_by_frames(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    store = Store(tmp_path / "workspace")
+    model = ModelEntry(
+        model="provider/model", roles=["vision"], input_cost_per_million=1,
+        output_cost_per_million=2,
+    )
+    def fail(**kwargs: object) -> None:
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr("litellm.token_counter", fail)
+    gate = ProviderGate(store, model, None)
+    assert gate.estimate_chat("中文", output_tokens=0) == pytest.approx(0.000003)
+    assert gate.estimate_vision("prompt", 2) > gate.estimate_vision("prompt", 1)
+
+
+def test_usage_summary_separates_estimated_only_and_reservations(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    job_id = _job(store, tmp_path)
+    estimated = store.reserve_usage(job_id, "chat", "model", "estimated", 0.2, None)[0]
+    store.finish_usage(estimated, None)
+    store.reserve_usage(job_id, "chat", "model", "active", 0.3, None)
+    summary = store.usage_summary(job_id)
+    assert summary["estimated_only_calls"] == 1
+    assert summary["estimated_only_cost_usd"] == pytest.approx(0.2)
+    assert summary["reserved_cost_usd"] == pytest.approx(0.3)

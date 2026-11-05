@@ -623,15 +623,22 @@ class Store:
             )
 
     def usage_summary(self, job_id: str) -> dict[str, Any]:
-        """Summarize known cost and unknown-cost calls without treating unknown as zero."""
+        """Separate actual, estimated, reserved, failed, and unknown provider exposure."""
 
         with self._connect() as connection:
             row = connection.execute(
                 """SELECT COUNT(*) AS calls,
+                   COALESCE(SUM(actual_cost_usd), 0) AS actual_cost_usd,
+                   COALESCE(SUM(CASE WHEN actual_cost_usd IS NULL AND status='completed'
+                       THEN estimated_cost_usd ELSE 0 END), 0) AS estimated_only_cost_usd,
+                   COALESCE(SUM(CASE WHEN status='reserved' THEN estimated_cost_usd ELSE 0 END), 0)
+                       AS reserved_cost_usd,
+                   SUM(CASE WHEN actual_cost_usd IS NULL AND estimated_cost_usd IS NOT NULL
+                       AND status='completed' THEN 1 ELSE 0 END) AS estimated_only_calls,
                    SUM(CASE WHEN status='uncertain' OR
                        (actual_cost_usd IS NULL AND estimated_cost_usd IS NULL)
                        THEN 1 ELSE 0 END) AS unknown_calls,
-                   SUM(COALESCE(actual_cost_usd, estimated_cost_usd)) AS known_cost_usd
+                   COALESCE(SUM(COALESCE(actual_cost_usd, estimated_cost_usd)), 0) AS known_cost_usd
                    FROM usage_records WHERE job_id=?""",
                 (job_id,),
             ).fetchone()

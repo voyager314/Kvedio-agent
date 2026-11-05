@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kvedio_agent.pipeline.analyze import AnalysisService
 from kvedio_agent.pipeline.context import EvidenceIndex
+from kvedio_agent.platform.providers import Completion
 from kvedio_agent.platform.storage import Store
 
 
@@ -13,9 +14,9 @@ class FakeModel:
         self.response = response
         self.prompts: list[str] = []
 
-    def complete(self, system: str, prompt: str) -> str:
+    def complete(self, system: str, prompt: str) -> Completion:
         self.prompts.append(prompt)
-        return json.dumps(self.response)
+        return Completion(json.dumps(self.response))
 
 
 def _job(store: Store, tmp_path: Path) -> tuple[str, str, str]:
@@ -77,12 +78,12 @@ def test_segment_and_timeline_agents_persist_only_valid_evidence_links(
                                "evidence_ids": ["summary-ref"]}]},
             ]
 
-        def complete(self, system: str, prompt: str) -> str:
+        def complete(self, system: str, prompt: str) -> Completion:
             response = self.responses.pop(0)
             if "chapters" in response:
                 summary = store.evidence_for_modality(job_id, "segment_summary")[0]
                 response["chapters"][0]["evidence_ids"] = [summary["id"]]
-            return json.dumps(response)
+            return Completion(json.dumps(response))
 
     service = AnalysisService(store, EvidenceIndex(store), SegmentTimelineModel())
     fact = service.understand_segment(job_id, 1000, 2000)

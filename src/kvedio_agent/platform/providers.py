@@ -50,6 +50,17 @@ class VisualObservation:
     frame_paths: tuple[str, ...] = ()  # Local generated frame paths; empty when unavailable.
 
 
+@dataclass(frozen=True)
+class Completion:
+    """Text completion and provider-reported usage; absent usage remains unknown."""
+
+    content: str
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    actual_cost_usd: float | None = None
+
+
 class ProviderError(RuntimeError):
     """Stable provider failure category safe for user-facing output."""
 
@@ -62,7 +73,7 @@ class ProviderError(RuntimeError):
 class ChatProvider(Protocol):
     """Generate bounded text analysis from structured evidence context."""
 
-    def complete(self, system: str, prompt: str) -> str: ...
+    def complete(self, system: str, prompt: str) -> Completion: ...
 
 
 class LiteLLMChat:
@@ -82,7 +93,7 @@ class LiteLLMChat:
         self.gate = gate
         self.job_id = job_id
 
-    def complete(self, system: str, prompt: str) -> str:
+    def complete(self, system: str, prompt: str) -> Completion:
         """Return one model response or a bounded provider error category."""
 
         reservation = self._reserve("chat", system, prompt)
@@ -91,6 +102,7 @@ class LiteLLMChat:
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": prompt}],
             "timeout": self.timeout_seconds,
+            "max_tokens": 2048,
         }
         if key := self.model.resolve_key():
             kwargs["api_key"] = key
@@ -101,8 +113,9 @@ class LiteLLMChat:
             content = response.choices[0].message.content
             if not isinstance(content, str):
                 raise ProviderError("provider_invalid_response", retryable=False)
-            self._settle(reservation, response)
-            return content
+            completion = _completion(response, content, self.model)
+            self._settle(reservation, completion)
+            return completion
         except ProviderError as exc:
             self._settle(reservation, None, failed=True, retryable=exc.retryable)
             raise
@@ -125,7 +138,7 @@ class LiteLLMChat:
         fingerprint = hashlib.sha256((system + "\0" + prompt).encode("utf-8")).hexdigest()
         return self.gate.reserve(
             self.job_id, stage, f"{stage}:{fingerprint}:{self.model.model}",
-            self.gate.estimate_chat(len(system.encode("utf-8")) + len(prompt.encode("utf-8"))),
+            self.gate.estimate_chat(system + "\n" + prompt, output_tokens=2048),
         )
 
     def _settle(
@@ -134,17 +147,9 @@ class LiteLLMChat:
     ) -> None:
         if reservation is None or self.gate is None:
             return
-        usage = getattr(response, "usage", None) if response is not None else None
-        input_tokens = getattr(usage, "prompt_tokens", None)
-        output_tokens = getattr(usage, "completion_tokens", None)
-        actual_cost = None
-        if input_tokens is not None and output_tokens is not None:
-            input_price = self.model.input_cost_per_million
-            output_price = self.model.output_cost_per_million
-            if input_price is not None and output_price is not None:
-                actual_cost = (
-                    input_tokens * input_price + output_tokens * output_price
-                ) / 1_000_000
+        input_tokens = response.input_tokens if isinstance(response, Completion) else None
+        output_tokens = response.output_tokens if isinstance(response, Completion) else None
+        actual_cost = response.actual_cost_usd if isinstance(response, Completion) else None
         self.gate.settle(
             reservation, actual_cost, input_tokens, output_tokens,
             failed=failed, retryable=retryable
@@ -287,7 +292,7 @@ class OpenAICompatibleVision:
                 raise ProviderError("provider_request_rejected", retryable=False)
             data = response.json()
             summary = str(data["choices"][0]["message"]["content"])
-            self._settle(reservation, frames)
+            self._settle(reservation, frames, data)
             return VisualObservation(
                 start_ms, end_ms, summary,
                 frame_times_ms=tuple(timestamp for _, timestamp in frames),
@@ -308,7 +313,6 @@ class OpenAICompatibleVision:
     ) -> UsageReservation | None:
         if self.gate is None or self.job_id is None:
             return None
-        size = sum(path.stat().st_size for path, _ in frames)
         return self.gate.reserve(
             self.job_id,
             "vision",
@@ -317,15 +321,34 @@ class OpenAICompatibleVision:
                 f"{start_ms}:" + ":".join(_file_digest(p) for p, _ in frames),
                 self.model,
             ),
-            self.gate.estimate_chat(size),
+            self.gate.estimate_vision(
+                "Describe important visible events and on-screen text.", len(frames)
+            ),
         )
 
     def _settle(
         self, reservation: UsageReservation | None,
-        frames: list[tuple[Path, int]], failed: bool = False, retryable: bool = False,
+        frames: list[tuple[Path, int]], response: dict[str, Any] | None = None,
+        failed: bool = False, retryable: bool = False,
     ) -> None:
         if reservation and self.gate:
-            self.gate.settle(reservation, None, failed=failed, retryable=retryable)
+            usage = response.get("usage", {}) if response else {}
+            input_tokens = usage.get("prompt_tokens")
+            output_tokens = usage.get("completion_tokens")
+            actual_cost = None
+            if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+                if (
+                    self.model.input_cost_per_million is not None
+                    and self.model.output_cost_per_million is not None
+                ):
+                    actual_cost = (
+                        input_tokens * self.model.input_cost_per_million
+                        + output_tokens * self.model.output_cost_per_million
+                    ) / 1_000_000
+            self.gate.settle(
+                reservation, actual_cost, input_tokens, output_tokens,
+                failed=failed, retryable=retryable,
+            )
 
 
 def _parse_transcript(payload: dict[str, Any], offset_ms: int) -> list[TranscriptSegment]:
@@ -356,6 +379,26 @@ def _parse_transcript(payload: dict[str, Any], offset_ms: int) -> list[Transcrip
             )
         )
     return normalized
+
+
+def _completion(response: Any, content: str, configured: ModelEntry) -> Completion:
+    """Normalize provider response usage and derive cost only from complete pricing data."""
+
+    usage = getattr(response, "usage", None)
+    input_tokens = getattr(usage, "prompt_tokens", None)
+    output_tokens = getattr(usage, "completion_tokens", None)
+    model_name = getattr(response, "model", None) or configured.model
+    actual_cost = None
+    if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+        if (
+            configured.input_cost_per_million is not None
+            and configured.output_cost_per_million is not None
+        ):
+            actual_cost = (
+                input_tokens * configured.input_cost_per_million
+                + output_tokens * configured.output_cost_per_million
+            ) / 1_000_000
+    return Completion(content, model_name, input_tokens, output_tokens, actual_cost)
 
 
 def _file_digest(path: Path) -> str:
