@@ -101,6 +101,41 @@ def test_chat_completion_returns_provider_usage(monkeypatch: pytest.MonkeyPatch)
     assert result.actual_cost_usd == pytest.approx(0.000026)
 
 
+def test_chat_adapter_accepts_tool_call_without_text_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHAT_TOKEN", "chat-secret")
+    model = ModelEntry(model="provider/model", api_key_env="CHAT_TOKEN", roles=["chat"])
+
+    class Function:
+        name = "search_evidence"
+        arguments = {"query": "launch"}
+
+    class Message:
+        content = None
+        tool_calls = [type("Call", (), {"id": "call-1", "function": Function()})()]
+
+    class Response:
+        choices = [type("Choice", (), {"message": Message()})()]
+        usage = None
+        model = "resolved/model"
+
+    captured: dict[str, object] = {}
+
+    def complete(**kwargs: object) -> Response:
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr("litellm.completion", complete)
+    result = LiteLLMChat(model).complete(
+        "system", "prompt", [{"type": "function", "function": {"name": "search_evidence"}}]
+    )
+    assert result.content == ""
+    assert result.tool_calls[0]["name"] == "search_evidence"
+    assert result.tool_calls[0]["arguments"] == '{"query": "launch"}'
+    assert captured["tool_choice"] == "auto"
+
+
 def test_visual_observation_preserves_frame_source_timestamps(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,9 +123,9 @@ class LiteLLMChat:
         try:
             response = litellm.completion(**kwargs)
             content = response.choices[0].message.content
-            if not isinstance(content, str):
+            if content is not None and not isinstance(content, str):
                 raise ProviderError("provider_invalid_response", retryable=False)
-            completion = _completion(response, content, self.model)
+            completion = _completion(response, content or "", self.model)
             self._settle(reservation, completion)
             return completion
         except ProviderError as exc:
@@ -423,7 +424,11 @@ def _completion(response: Any, content: str, configured: ModelEntry) -> Completi
         {
             "id": str(call.id),
             "name": str(call.function.name),
-            "arguments": call.function.arguments,
+            "arguments": (
+                call.function.arguments
+                if isinstance(call.function.arguments, str)
+                else json.dumps(call.function.arguments, ensure_ascii=False)
+            ),
         }
         for call in raw_calls
     )
