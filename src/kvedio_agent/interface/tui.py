@@ -70,11 +70,14 @@ class WorkbenchApp(App[None]):
         self, store: Store,
         follow_up: Callable[[str, str], AnalysisResult] | None = None,
         upload: Callable[[Path], UploadProgress] | None = None,
+        analyze: Callable[[Path, str], str] | None = None,
     ) -> None:
         super().__init__()
         self.store = store
         self.follow_up = follow_up
         self.upload = upload
+        self.analyze = analyze
+        self.uploaded_video_path: Path | None = None
         self.selected_job_id: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -86,6 +89,7 @@ class WorkbenchApp(App[None]):
                 yield Static("No evidence selected", id="evidence")
                 yield Static("No usage data", id="usage")
         yield Input(placeholder="Upload MP4 path", id="upload")
+        yield Input(placeholder="Analysis objective for uploaded video", id="objective")
         yield Input(placeholder="Ask a follow-up for the selected job", id="ask")
         yield Footer()
 
@@ -132,6 +136,14 @@ class WorkbenchApp(App[None]):
                 self._run_upload(Path(event.value.strip()), upload)
             event.input.value = ""
             return
+        if event.input.id == "objective":
+            analyze = self.analyze
+            if self.uploaded_video_path and event.value.strip() and analyze is not None:
+                self._run_analysis(
+                    self.uploaded_video_path, event.value.strip(), analyze
+                )
+            event.input.value = ""
+            return
         follow_up = self.follow_up
         if self.selected_job_id and event.value.strip() and follow_up is not None:
             self._run_follow_up(self.selected_job_id, event.value.strip(), follow_up)
@@ -149,11 +161,29 @@ class WorkbenchApp(App[None]):
             )
             if result.target_path:
                 message += f"\nStored video: {result.target_path}"
+                self.uploaded_video_path = result.target_path
             self.app.call_from_thread(self.query_one("#events", Static).update, message)
         except Exception:
             self.app.call_from_thread(
                 self.query_one("#events", Static).update,
                 "Upload failed; verify the MP4 path and resume ID.",
+            )
+
+    @work(thread=True, exclusive=True)
+    def _run_analysis(
+        self, video: Path, objective: str, analyze: Callable[[Path, str], str]
+    ) -> None:
+        try:
+            job_id = analyze(video, objective)
+            self.app.call_from_thread(
+                self.query_one("#events", Static).update,
+                f"Analysis started for job {job_id}",
+            )
+            self.app.call_from_thread(self.refresh_jobs)
+        except Exception:
+            self.app.call_from_thread(
+                self.query_one("#events", Static).update,
+                "Analysis failed; check model bindings and provider status.",
             )
 
     @work(thread=True, exclusive=True)
@@ -182,7 +212,8 @@ def run_workbench(
     store: Store,
     follow_up: Callable[[str, str], AnalysisResult],
     upload: Callable[[Path], UploadProgress],
+    analyze: Callable[[Path, str], str],
 ) -> None:
     """Run the stateful workbench for the current local workspace."""
 
-    WorkbenchApp(store, follow_up, upload).run()
+    WorkbenchApp(store, follow_up, upload, analyze).run()

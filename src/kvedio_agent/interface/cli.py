@@ -559,7 +559,11 @@ def workbench_command() -> None:
     def upload(video: Path) -> UploadProgress:
         return LocalChunkIngestor(store).ingest(video)
 
-    run_workbench(store, follow_up, upload)
+    def analyze(video: Path, objective: str) -> str:
+        job_id, _ = _run_analysis(video, objective, settings)
+        return job_id
+
+    run_workbench(store, follow_up, upload, analyze)
 
 
 @app.callback(invoke_without_command=True)
