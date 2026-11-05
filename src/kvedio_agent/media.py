@@ -141,7 +141,7 @@ class MediaProcessor:
             if end == media.duration_ms:
                 break
             start = end - overlap_ms
-        self.store.set_job_status(job_id, "completed", "preprocess")
+        self.store.upsert_stage(job_id, "preprocess", "completed", progress=1)
         return source_id, job_id, media
 
     def _write_audio(self, source: Path, start_ms: int, end_ms: int, target: Path) -> None:

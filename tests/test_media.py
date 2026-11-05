@@ -63,6 +63,7 @@ def test_preprocess_creates_time_indexed_keyframes_and_resumes(
     reopened = Store(tmp_path / "workspace")
     assert resumed_job_id == job_id
     assert reopened.job_history()[0]["id"] == job_id
+    assert reopened.recoverable_jobs()[0]["id"] == job_id
     assert source_id
 
 
