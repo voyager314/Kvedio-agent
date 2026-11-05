@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
+import litellm
 
 from kvedio_agent.settings import ModelEntry
 
@@ -53,6 +54,53 @@ class ProviderError(RuntimeError):
         super().__init__(category)
         self.category = category
         self.retryable = retryable
+
+
+class ChatProvider(Protocol):
+    """Generate bounded text analysis from structured evidence context."""
+
+    def complete(self, system: str, prompt: str) -> str: ...
+
+
+class LiteLLMChat:
+    """Call a user-configured chat model while returning only safe errors."""
+
+    def __init__(self, model: ModelEntry, timeout_seconds: float = 120.0) -> None:
+        if not model.resolve_key():
+            raise ProviderError("missing_provider_configuration", retryable=False)
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+
+    def complete(self, system: str, prompt: str) -> str:
+        """Return one model response or a bounded provider error category."""
+
+        kwargs: dict[str, Any] = {
+            "model": self.model.model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": prompt}],
+            "timeout": self.timeout_seconds,
+        }
+        if key := self.model.resolve_key():
+            kwargs["api_key"] = key
+        if self.model.api_base:
+            kwargs["api_base"] = self.model.api_base
+        try:
+            response = litellm.completion(**kwargs)
+            content = response.choices[0].message.content
+            if not isinstance(content, str):
+                raise ProviderError("provider_invalid_response", retryable=False)
+            return content
+        except ProviderError:
+            raise
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            retryable = status == 429 or (isinstance(status, int) and status >= 500)
+            category = (
+                "provider_rate_limited_or_unavailable"
+                if retryable
+                else "provider_request_failed"
+            )
+            raise ProviderError(category, retryable=retryable) from None
 
 
 class ASRProvider(Protocol):
