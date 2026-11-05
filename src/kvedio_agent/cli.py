@@ -15,7 +15,7 @@ from rich.table import Table
 
 from kvedio_agent.analyze import AnalysisService
 from kvedio_agent.config import Config
-from kvedio_agent.context import EvidenceIndex
+from kvedio_agent.context import EvidenceIndex, Scratchpad
 from kvedio_agent.jobs import StageScheduler, WorkUnit
 from kvedio_agent.media import MediaProcessor, fingerprint
 from kvedio_agent.providers import (
@@ -105,7 +105,9 @@ def _chat(settings: Settings) -> LiteLLMChat:
     return LiteLLMChat(selected[1], selected[1].timeout_seconds)
 
 
-def _evidence_context(settings: Settings, job_id: str) -> list[dict[str, Any]]:
+def _evidence_context(
+    settings: Settings, job_id: str, scratchpad: Scratchpad
+) -> list[dict[str, Any]]:
     config = Config.from_settings(settings)
     history = store.job_history()
     job = next((row for row in history if row["id"] == job_id), None)
@@ -196,10 +198,64 @@ def _evidence_context(settings: Settings, job_id: str) -> list[dict[str, Any]]:
             scheduler.max_workers = config.max_vision_workers
             scheduler.run(job_id, "inspect_visuals", vision_units, inspect, save_observation)
 
-        completed = progress.tasks[0].completed
-        if completed < total:
-            progress.advance(task_id, total - completed)
-        console.print(f"Milestone: processed {total} media segments.")
+    service = AnalysisService(store, EvidenceIndex(store), _chat(settings))
+    scratchpad.current_stage = "understand_segments"
+    completed_ranges = set(scratchpad.completed_ranges)
+    for segment in manifest["segments"]:
+        start_ms = segment["start_ms"]
+        end_ms = segment["end_ms"]
+        if (start_ms, end_ms) in completed_ranges:
+            continue
+        transcript = store.evidence_for_range(job_id, start_ms, end_ms)
+        if not transcript:
+            scratchpad.failed_ranges.append((start_ms, end_ms, "missing_segment_evidence"))
+            scratchpad.quality_flags.append(f"No provider evidence for {start_ms}..{end_ms} ms")
+            scratchpad.save(store, job_id)
+            continue
+        summary_exists = any(
+            item["start_ms"] == start_ms and item["end_ms"] == end_ms
+            for item in store.evidence_for_modality(job_id, "segment_summary")
+        )
+        fact = None
+        if not summary_exists:
+            fact = service.understand_segment(
+                job_id, start_ms, end_ms, config.retention_days
+            )
+        else:
+            summary = next(
+                item for item in store.evidence_for_modality(job_id, "segment_summary")
+                if item["start_ms"] == start_ms and item["end_ms"] == end_ms
+            )
+            provenance = json.loads(summary["provenance_json"])
+            refs = provenance.get("evidence_ids", [])
+            if not refs or any(store.evidence_by_id(ref) is None for ref in refs):
+                fact = service.understand_segment(
+                    job_id, start_ms, end_ms, config.retention_days
+                )
+            else:
+                fact = service.segment_fact_from_summary(summary, provenance)
+        scratchpad.record_segment(
+            start_ms,
+            end_ms,
+            list(fact.evidence_ids),
+            [item for item in transcript if item["modality"] == "transcript"],
+            [item for item in transcript if item["modality"] == "visual"],
+            list(fact.entities),
+            fact.uncertainty,
+        )
+        scratchpad.save(store, job_id)
+
+    scratchpad.current_stage = "synthesize_timeline"
+    scratchpad.save(store, job_id)
+    chapters = service.synthesize_timeline(job_id, config.retention_days)
+    scratchpad.timeline_facts = [chapter.model_dump() for chapter in chapters]
+    scratchpad.current_stage = "ready_for_question"
+    scratchpad.save(store, job_id)
+
+    completed = progress.tasks[0].completed
+    if completed < total:
+        progress.advance(task_id, total - completed)
+    console.print(f"Milestone: processed {total} media segments.")
     return EvidenceIndex(store).retrieve(job_id, "")
 
 
@@ -239,7 +295,10 @@ def _run_analysis(
         f"{video.name} · {media.duration_ms / 1000:.1f}s · job {job_id[:8]}",
         title="Video prepared",
     ))
-    _evidence_context(settings, job_id)
+    prior = store.checkpoint(job_id)
+    scratchpad = Scratchpad.from_dict(prior) if prior else Scratchpad(objective=objective)
+    scratchpad.objective = objective
+    _evidence_context(settings, job_id, scratchpad)
     conversation_id = store.latest_conversation(job_id) or store.create_conversation(
         job_id, objective
     )

@@ -39,6 +39,7 @@ class AnalysisResult(BaseModel):
     claims: list[ConclusionClaim]
     uncertainties: list[str]
     quality_assessment: str
+    stage_trace: list[str] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,19 @@ class SegmentFact:
     uncertainty: str | None = None
 
 
+class TimelineChapter(BaseModel):
+    """One chronological chapter linked to segment evidence."""
+
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    title: str
+    summary: str
+    evidence_ids: list[str] = Field(min_length=1)
+
+    def valid_range(self) -> bool:
+        return self.end_ms > self.start_ms
+
+
 class AnalysisService:
     """Create segment facts, timeline summaries, answers, and durable follow-ups."""
 
@@ -61,7 +75,9 @@ class AnalysisService:
         self.index = index
         self.model = model
 
-    def understand_segment(self, job_id: str, start_ms: int, end_ms: int) -> SegmentFact:
+    def understand_segment(
+        self, job_id: str, start_ms: int, end_ms: int, retention_days: int = 30
+    ) -> SegmentFact:
         """Summarize only evidence for one bounded source-time segment."""
 
         evidence = self.store.evidence_for_range(job_id, start_ms, end_ms)
@@ -79,16 +95,35 @@ class AnalysisService:
             entities=tuple(data.get("entities", [])),
             uncertainty=data.get("uncertainty"),
         )
+        allowed = {item["id"] for item in evidence}
+        if not fact.summary or not fact.evidence_ids or not set(fact.evidence_ids) <= allowed:
+            raise ProviderError("analysis_invalid_citation", retryable=False)
         self.store.add_artifact_summary(
             job_id, "segment_summary", start_ms, end_ms,
-            json.dumps(data, ensure_ascii=False), "segment-agent", 30,
+            json.dumps(data, ensure_ascii=False), "segment-agent", retention_days,
+            evidence_ids=list(fact.evidence_ids),
         )
         return fact
 
-    def synthesize_timeline(self, job_id: str) -> list[dict[str, Any]]:
+    def segment_fact_from_summary(
+        self, summary: dict[str, Any], provenance: dict[str, Any]
+    ) -> SegmentFact:
+        """Restore a segment fact from a persisted summary and its evidence references."""
+
+        data = _parse_json(str(summary.get("content") or "{}"))
+        return SegmentFact(
+            int(summary["start_ms"]),
+            int(summary["end_ms"]),
+            str(data.get("summary", "")),
+            tuple(str(item) for item in provenance.get("evidence_ids", [])),
+            tuple(str(item) for item in data.get("entities", [])),
+            data.get("uncertainty"),
+        )
+
+    def synthesize_timeline(self, job_id: str, retention_days: int = 30) -> list[TimelineChapter]:
         """Reduce stored segment summaries into ordered video chapters."""
 
-        summaries = self.store.search_evidence(job_id, ["summary"], 500)
+        summaries = self.store.evidence_for_modality(job_id, "segment_summary")
         if not summaries:
             return []
         response = self.model.complete(
@@ -96,15 +131,34 @@ class AnalysisService:
             _json_prompt("Create chronological chapters and key moments.", summaries),
         )
         data = _parse_json(response)
-        chapters = data.get("chapters", [])
-        if not isinstance(chapters, list):
+        raw_chapters = data.get("chapters", [])
+        if not isinstance(raw_chapters, list):
             raise ProviderError("analysis_invalid_response", retryable=False)
+        available = {item["id"] for item in summaries}
+        chapters: list[TimelineChapter] = []
+        try:
+            for raw in raw_chapters:
+                chapter = TimelineChapter.model_validate(raw)
+                if not chapter.valid_range() or not set(chapter.evidence_ids) <= available:
+                    raise ProviderError("analysis_invalid_citation", retryable=False)
+                self.store.add_artifact_summary(
+                    job_id, "timeline_summary", chapter.start_ms, chapter.end_ms,
+                    json.dumps(chapter.model_dump(), ensure_ascii=False),
+                    "timeline-agent", retention_days,
+                    evidence_ids=chapter.evidence_ids,
+                )
+                chapters.append(chapter)
+        except ValidationError:
+            raise ProviderError("analysis_invalid_response", retryable=False) from None
         return chapters
 
     def analyze(self, job_id: str, objective: str) -> AnalysisResult:
         """Answer an objective from bounded evidence and validate citations."""
 
         context = self.index.retrieve(job_id, objective)
+        context.extend(self.store.evidence_for_modality(job_id, "timeline_summary"))
+        context = list({item["id"]: item for item in context}.values())
+        context.sort(key=lambda item: (item["start_ms"], item["end_ms"]))
         if not context:
             raise ValueError("no matching evidence is available")
         response = self.model.complete(
@@ -128,6 +182,8 @@ class AnalysisService:
         messages = self.store.conversation_messages(conversation_id)[-history_limit:]
         self.store.add_message(conversation_id, "user", question)
         context = self.index.retrieve(job_id, question)
+        if not context:
+            context = self.store.recent_evidence(job_id, self.index.budget.max_items)
         history = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
         prompt = f"Conversation so far:\n{history}\n\nNew question: {question}\n\nEvidence:\n"
         prompt += _format_evidence(context)
@@ -139,6 +195,9 @@ class AnalysisService:
         evidence_ids = [
             evidence_id for claim in result.claims for evidence_id in claim.evidence_ids
         ]
+        available = {item["id"] for item in context}
+        if not set(evidence_ids) <= available:
+            raise ProviderError("analysis_invalid_citation", retryable=False)
         self.store.add_message(conversation_id, "assistant", result.model_dump_json(), evidence_ids)
         return result
 

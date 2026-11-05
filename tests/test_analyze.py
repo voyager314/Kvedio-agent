@@ -59,3 +59,34 @@ def test_follow_up_persists_turns_for_restart(tmp_path: Path) -> None:
     service.follow_up(job_id, conversation_id, "What next?")
     messages = Store(tmp_path / "workspace").conversation_messages(conversation_id)
     assert [message["role"] for message in messages] == ["user", "assistant"]
+
+
+def test_segment_and_timeline_agents_persist_only_valid_evidence_links(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "workspace")
+    job_id, evidence_id, _ = _job(store, tmp_path)
+
+    class SegmentTimelineModel:
+        def __init__(self) -> None:
+            self.responses = [
+                {"summary": "Launch was approved", "evidence_ids": [evidence_id],
+                 "entities": ["Project A"], "uncertainty": None},
+                {"chapters": [{"start_ms": 1000, "end_ms": 2000, "title": "Approval",
+                               "summary": "The launch was approved.",
+                               "evidence_ids": ["summary-ref"]}]},
+            ]
+
+        def complete(self, system: str, prompt: str) -> str:
+            response = self.responses.pop(0)
+            if "chapters" in response:
+                summary = store.evidence_for_modality(job_id, "segment_summary")[0]
+                response["chapters"][0]["evidence_ids"] = [summary["id"]]
+            return json.dumps(response)
+
+    service = AnalysisService(store, EvidenceIndex(store), SegmentTimelineModel())
+    fact = service.understand_segment(job_id, 1000, 2000)
+    chapters = service.synthesize_timeline(job_id)
+    assert fact.evidence_ids == (evidence_id,)
+    assert chapters[0].title == "Approval"
+    assert store.evidence_for_modality(job_id, "timeline_summary")

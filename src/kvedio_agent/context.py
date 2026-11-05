@@ -68,6 +68,26 @@ class Scratchpad:
 
         store.save_checkpoint(job_id, self.to_dict())
 
+    def record_segment(
+        self, start_ms: int, end_ms: int, evidence_ids: list[str],
+        transcript_facts: list[dict[str, Any]], visual_facts: list[dict[str, Any]],
+        entities: list[str], uncertainty: str | None,
+    ) -> None:
+        """Merge one completed segment's references and facts into the checkpoint."""
+
+        self.completed_ranges = [
+            item for item in self.completed_ranges if item != (start_ms, end_ms)
+        ]
+        self.completed_ranges.append((start_ms, end_ms))
+        self.completed_ranges.sort()
+        self.pending_ranges = [item for item in self.pending_ranges if item != (start_ms, end_ms)]
+        self.evidence_refs = list(dict.fromkeys([*self.evidence_refs, *evidence_ids]))
+        self.transcript_facts.extend(transcript_facts)
+        self.visual_facts.extend(visual_facts)
+        self.entities = list(dict.fromkeys([*self.entities, *entities]))
+        if uncertainty:
+            self.uncertainties.append(uncertainty)
+
 
 @dataclass(frozen=True)
 class ContextBudget:

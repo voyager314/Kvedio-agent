@@ -296,6 +296,26 @@ class Store:
             ).fetchone()
         return row is not None
 
+    def evidence_for_modality(self, job_id: str, modality: str) -> list[dict[str, Any]]:
+        """Return one evidence modality ordered by source time."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM evidence WHERE job_id=? AND modality=? ORDER BY start_ms, end_ms",
+                (job_id, modality),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_evidence(self, job_id: str, limit: int) -> list[dict[str, Any]]:
+        """Return a bounded set of the most recent source-time evidence."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM evidence WHERE job_id=? ORDER BY start_ms DESC, end_ms DESC LIMIT ?",
+                (job_id, limit),
+            ).fetchall()
+        return sorted((dict(row) for row in rows), key=lambda item: item["start_ms"])
+
     def upsert_stage(self, job_id: str, name: str, status: str, attempt: int = 0,
                      progress: float = 0, error_category: str | None = None) -> str:
         """Persist stage progress without storing raw exception details."""
@@ -577,7 +597,7 @@ class Store:
 
     def add_artifact_summary(
         self, job_id: str, kind: str, start_ms: int, end_ms: int, summary: str,
-        producer: str, retention_days: int,
+        producer: str, retention_days: int, evidence_ids: list[str] | None = None,
     ) -> str:
         """Store a generated text summary as an artifact and searchable evidence."""
 
@@ -591,7 +611,8 @@ class Store:
             job_id, kind, path, digest, producer, retention_days
         )
         evidence_id = self.add_evidence(
-            job_id, kind, start_ms, end_ms, {"producer": producer}, summary, artifact_id
+            job_id, kind, start_ms, end_ms,
+            {"producer": producer, "evidence_ids": evidence_ids or []}, summary, artifact_id
         )
         return evidence_id
 
