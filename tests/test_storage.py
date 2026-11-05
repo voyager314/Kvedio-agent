@@ -83,3 +83,18 @@ def test_deleting_job_preserves_shared_source_registration(tmp_path: Path) -> No
         assert connection.execute(
             "SELECT COUNT(*) FROM video_sources WHERE id=?", (source_id,)
         ).fetchone()[0] == 1
+
+
+def test_recovery_requeues_running_work_and_evidence_is_idempotent(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    source_id = _source(store, tmp_path)
+    job_id = store.create_job(source_id, "objective", {"retention_days": 30})
+    store.set_job_status(job_id, "running", "transcribe")
+    segment_id = store.add_segment(job_id, "audio", 0, 1000)
+    store.upsert_stage(job_id, "transcribe", "running", attempt=1)
+    store.set_segment_status(segment_id, "running")
+    evidence_id = store.add_evidence(job_id, "transcript", 0, 1000, {}, "hello")
+    assert store.add_evidence(job_id, "transcript", 0, 1000, {}, "hello") == evidence_id
+    assert store.recover_interrupted_work() == 1
+    assert store.recoverable_jobs()[0]["id"] == job_id
+    assert store.pending_segments(job_id, "audio")[0]["status"] == "pending"

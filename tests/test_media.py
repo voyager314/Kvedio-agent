@@ -56,7 +56,7 @@ def test_preprocess_creates_time_indexed_keyframes_and_resumes(
     config = Config(max_segment_duration_seconds=1, segment_overlap_seconds=0)
     processor = MediaProcessor(store, config)
     source_id, job_id, media = processor.preprocess(sample_video)
-    manifest_path = store.root / "artifacts" / fingerprint(sample_video).digest / "manifest.json"
+    manifest_path = processor.manifest_path(fingerprint(sample_video).digest)
     assert media.duration_ms == 2000
     assert manifest_path.exists()
     _, resumed_job_id, _ = processor.preprocess(sample_video)
@@ -65,6 +65,29 @@ def test_preprocess_creates_time_indexed_keyframes_and_resumes(
     assert reopened.job_history()[0]["id"] == job_id
     assert reopened.recoverable_jobs()[0]["id"] == job_id
     assert source_id
+
+
+def test_provider_identity_changes_job_but_reuses_preprocessed_media(
+    sample_video: Path, tmp_path: Path
+) -> None:
+    store = Store(tmp_path / "workspace")
+    processor = MediaProcessor(
+        store, Config(max_segment_duration_seconds=1, segment_overlap_seconds=0)
+    )
+    _, first_job, _ = processor.preprocess(sample_video, "objective", {"asr": "model-a"})
+    _, second_job, _ = processor.preprocess(sample_video, "objective", {"asr": "model-b"})
+    assert first_job != second_job
+    assert processor.manifest_path(fingerprint(sample_video).digest).exists()
+
+
+def test_processing_settings_have_distinct_manifest_paths(
+    sample_video: Path, tmp_path: Path
+) -> None:
+    store = Store(tmp_path / "workspace")
+    first = MediaProcessor(store, Config(max_segment_duration_seconds=30))
+    second = MediaProcessor(store, Config(max_segment_duration_seconds=60))
+    digest = fingerprint(sample_video).digest
+    assert first.manifest_path(digest) != second.manifest_path(digest)
 
 
 def test_probe_rejects_invalid_media(tmp_path: Path) -> None:

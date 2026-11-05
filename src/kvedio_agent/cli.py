@@ -50,6 +50,7 @@ def _load_settings() -> Settings:
     if settings is None:
         raise typer.Exit(code=0)
     resolved = settings.with_state(load_state())
+    store.recover_interrupted_work()
     store.cleanup_expired(Config.from_settings(resolved).retention_days)
     return resolved
 
@@ -112,7 +113,9 @@ def _evidence_context(settings: Settings, job_id: str) -> list[dict[str, Any]]:
         raise typer.BadParameter("Job does not exist.")
     source = Path(job["source_path"])
     source_digest = fingerprint(source).digest
-    manifest_path = store.root / "artifacts" / source_digest / "manifest.json"
+    manifest_path = MediaProcessor(
+        store, Config.from_settings(settings)
+    ).manifest_path(source_digest)
     if not manifest_path.exists():
         raise typer.BadParameter("Media manifest is missing; resume the job to rebuild it.")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -216,7 +219,14 @@ def _run_analysis(
     video: Path, objective: str, settings: Settings, job_id: str | None = None
 ) -> tuple[str, str]:
     config = Config.from_settings(settings)
-    source_id, resolved_job_id, media = MediaProcessor(store, config).preprocess(video, objective)
+    provider_identity = {
+        role: selected[1].model
+        for role in ("chat", "asr", "vision")
+        if (selected := _model(settings, role)) is not None
+    }
+    source_id, resolved_job_id, media = MediaProcessor(store, config).preprocess(
+        video, objective, provider_identity
+    )
     if job_id is not None and resolved_job_id != job_id:
         raise typer.BadParameter("The requested job no longer matches the source and objective.")
     job_id = resolved_job_id
@@ -244,6 +254,15 @@ def models_command() -> None:
     """List configured models and role bindings."""
 
     _print_models(_load_settings())
+
+
+@app.command("reference")
+def reference_command() -> None:
+    """Display the packaged provider reference document."""
+
+    from kvedio_agent.settings import render_reference
+
+    console.print(render_reference())
 
 
 @app.command("config")

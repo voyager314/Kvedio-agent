@@ -23,6 +23,7 @@ ROLES: tuple[Role, ...] = ("chat", "asr", "vision")
 SETTINGS_FILENAME = "settings.json"
 STATE_FILENAME = "state.json"
 TEMPLATE_RESOURCE = "settings.example.json"
+REFERENCE_RESOURCE = "reference.md"
 
 
 def config_dir() -> Path:
@@ -196,6 +197,12 @@ def render_template() -> str:
     """Return the provider-free settings template shipped with the package."""
 
     return resources.files("kvedio_agent.defaults").joinpath(TEMPLATE_RESOURCE).read_text("utf-8")
+
+
+def render_reference() -> str:
+    """Return the packaged provider reference document."""
+
+    return resources.files("kvedio_agent.defaults").joinpath(REFERENCE_RESOURCE).read_text("utf-8")
 
 
 def ensure_settings(console: Console) -> Settings | None:

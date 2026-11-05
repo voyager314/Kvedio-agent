@@ -78,23 +78,38 @@ class MediaProcessor:
         self.store = store
         self.config = config
 
+    def manifest_path(self, source_digest: str) -> Path:
+        """Return a manifest path namespaced by source and processing settings."""
+
+        processing_key = hashlib.sha256(
+            json.dumps(self.config.model_dump(), sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+        return self.store.root / "artifacts" / source_digest / processing_key / "manifest.json"
+
     def preprocess(
-        self, path: Path, objective: str = "media preprocessing"
+        self,
+        path: Path,
+        objective: str = "media preprocessing",
+        provider_identity: dict[str, str] | None = None,
     ) -> tuple[str, str, MediaProbe]:
         """Register a source and produce deterministic, checkpointed media windows."""
 
         source = path.expanduser().resolve(strict=True)
         identity = fingerprint(source)
         media = probe(source, self.config)
+        config_snapshot = {
+            "runtime": self.config.model_dump(),
+            "providers": provider_identity or {},
+        }
         source_id = self.store.find_source(source, identity.digest) or self.store.register_source(
             source, identity.size_bytes, identity.modified_ns, identity.digest, media.__dict__
         )
-        job_id = self.store.find_job(source_id, objective) or self.store.create_job(
-            source_id, objective, self.config.model_dump()
-        )
-        output_dir = self.store.root / "artifacts" / identity.digest
+        job_id = self.store.find_job(source_id, objective, config_snapshot)
+        if job_id is None:
+            job_id = self.store.create_job(source_id, objective, config_snapshot)
+        manifest_path = self.manifest_path(identity.digest)
+        output_dir = manifest_path.parent
         output_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path = output_dir / "manifest.json"
         if manifest_path.exists():
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

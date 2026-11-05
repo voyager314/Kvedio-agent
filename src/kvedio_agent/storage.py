@@ -48,6 +48,23 @@ class Store:
         self.database = self.root / "kvedio.sqlite3"
         self._migrate()
 
+    def recover_interrupted_work(self) -> int:
+        """Return interrupted jobs and their in-flight stages and segments to retryable state."""
+
+        now = _timestamp()
+        with self._connect() as connection:
+            jobs = connection.execute(
+                "UPDATE jobs SET status='interrupted', updated_at=? WHERE status='running'",
+                (now,),
+            ).rowcount
+            connection.execute(
+                "UPDATE stages SET status='interrupted' WHERE status='running'"
+            )
+            connection.execute(
+                "UPDATE segments SET status='pending' WHERE status='running'"
+            )
+        return jobs
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database, timeout=30)
         connection.row_factory = sqlite3.Row
@@ -224,14 +241,16 @@ class Store:
             )
         return job_id
 
-    def find_job(self, source_id: str, objective: str) -> str | None:
-        """Find the latest reusable job with the same source and objective."""
+    def find_job(
+        self, source_id: str, objective: str, config_snapshot: dict[str, Any]
+    ) -> str | None:
+        """Find the latest job with matching source, objective, and execution settings."""
 
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id FROM jobs WHERE source_id=? AND objective=? "
+                "SELECT id FROM jobs WHERE source_id=? AND objective=? AND config_json=? "
                 "ORDER BY created_at DESC LIMIT 1",
-                (source_id, objective),
+                (source_id, objective, _json(config_snapshot)),
             ).fetchone()
         return str(row["id"]) if row else None
 
@@ -287,7 +306,7 @@ class Store:
                 """INSERT INTO stages(id, job_id, name, status, attempt, progress, error_category)
                    VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(job_id, name) DO UPDATE SET status=excluded.status,
-                   attempt=excluded.attempt, progress=excluded.progress,
+                   attempt=MAX(stages.attempt, excluded.attempt), progress=excluded.progress,
                    error_category=excluded.error_category""",
                 (stage_id, job_id, name, status, attempt, progress, error_category),
             )
@@ -346,6 +365,14 @@ class Store:
         _assert_secret_free(provenance)
         evidence_id = str(uuid.uuid4())
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """SELECT id FROM evidence WHERE job_id=? AND modality=? AND start_ms=?
+                   AND end_ms=? AND content IS ? AND artifact_id IS ? LIMIT 1""",
+                (job_id, modality, start_ms, end_ms, content, artifact_id),
+            ).fetchone()
+            if existing:
+                return str(existing["id"])
             connection.execute(
                 "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (evidence_id, job_id, modality, start_ms, end_ms, content, artifact_id,

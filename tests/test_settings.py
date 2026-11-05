@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from importlib import resources
 from io import StringIO
 from pathlib import Path
 
@@ -91,4 +92,9 @@ def test_runtime_defaults_match_local_video_limits() -> None:
     config = Config()
     assert config.max_video_duration_seconds == 7200
     assert config.retention_days == 30
+
+
+def test_provider_reference_is_packaged_resource() -> None:
+    reference = resources.files("kvedio_agent.defaults").joinpath("reference.md")
+    assert "Model Provider Reference" in reference.read_text(encoding="utf-8")
 

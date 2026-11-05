@@ -83,59 +83,73 @@ class StageScheduler:
             return []
         stage_id = self.store.upsert_stage(job_id, stage_name, "running")
         results: list[WorkResult] = []
-        successful: dict[str, tuple[WorkUnit, WorkResult]] = {}
         with ThreadPoolExecutor(
             max_workers=self.max_workers, thread_name_prefix="kvedio-stage"
         ) as pool:
             pending: dict[Future[WorkResult], WorkUnit] = {}
             unit_iter = iter(unit_list)
+
+            def submit(unit: WorkUnit) -> None:
+                self.store.set_segment_status(unit.id, "running")
+                pending[pool.submit(self._run_unit, unit, worker)] = unit
+
             for _ in range(min(self.max_workers, len(unit_list))):
                 if self._cancel.is_set():
                     break
                 unit = next(unit_iter)
-                pending[pool.submit(self._run_unit, unit, worker)] = unit
+                submit(unit)
             while pending:
                 completed, _ = wait(pending, return_when=FIRST_COMPLETED)
                 for future in completed:
                     unit = pending.pop(future)
                     result = future.result()
                     results.append(result)
-                    if result.error_category is None:
-                        successful[unit.id] = (unit, result)
-                        self.store.set_segment_status(unit.id, "completed")
-                        self.store.add_event(
-                            job_id, "segment_completed", "Segment completed",
-                            {"segment_id": unit.id, "start_ms": unit.start_ms,
-                             "end_ms": unit.end_ms}, stage_id,
-                        )
-                    else:
-                        self.store.set_segment_status(unit.id, "retryable_failed")
-                        self.store.add_event(
-                            job_id, "segment_failed", "Segment processing failed",
-                            {"segment_id": unit.id, "error_category": result.error_category},
-                            stage_id,
-                        )
                     try:
                         next_unit = next(unit_iter)
                     except StopIteration:
                         continue
                     if not self._cancel.is_set():
-                        pending[pool.submit(self._run_unit, next_unit, worker)] = next_unit
-                    else:
-                        self.store.set_segment_status(next_unit.id, "pending")
-            for future in pending:
-                future.cancel()
+                        submit(next_unit)
         start_by_id = {unit.id: unit.start_ms for unit in unit_list}
         ordered = sorted(results, key=lambda result: start_by_id[result.unit_id])
+        unit_by_id = {unit.id: unit for unit in unit_list}
+        committed = 0
+        failures = 0
         for result in ordered:
-            if result.error_category is None:
-                unit, successful_result = successful[result.unit_id]
-                on_success(unit, successful_result.value)
-        failed = any(result.error_category for result in ordered)
+            unit = unit_by_id[result.unit_id]
+            error_category = result.error_category
+            if error_category is None:
+                try:
+                    on_success(unit, result.value)
+                except Exception:
+                    error_category = "stage_output_commit_failed"
+            if error_category is None:
+                self.store.set_segment_status(unit.id, "completed")
+                committed += 1
+                self.store.add_event(
+                    job_id, "segment_completed", "Segment completed",
+                    {"segment_id": unit.id, "start_ms": unit.start_ms,
+                     "end_ms": unit.end_ms}, stage_id,
+                )
+            else:
+                status = "cancelled" if error_category == "cancelled" else "retryable_failed"
+                self.store.set_segment_status(unit.id, status)
+                failures += status != "cancelled"
+                self.store.add_event(
+                    job_id, "segment_failed", "Segment processing failed",
+                    {"segment_id": unit.id, "error_category": error_category}, stage_id,
+                )
+            self.store.upsert_stage(
+                job_id, stage_name, "running", attempt=result.attempts,
+                progress=(committed + failures) / len(unit_list),
+            )
+        cancelled = self._cancel.is_set() or len(results) < len(unit_list)
+        failed = failures > 0
+        stage_status = "interrupted" if cancelled else "retryable_failed" if failed else "completed"
         self.store.upsert_stage(
-            job_id, stage_name, "retryable_failed" if failed else "completed",
+            job_id, stage_name, stage_status,
             attempt=max((result.attempts for result in ordered), default=0),
-            progress=sum(result.error_category is None for result in ordered) / len(ordered),
+            progress=committed / len(unit_list),
         )
         return ordered
 
