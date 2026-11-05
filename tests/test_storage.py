@@ -70,3 +70,16 @@ def test_storage_rejects_secrets_and_external_artifacts(tmp_path: Path) -> None:
     external = tmp_path / "outside.json"
     with pytest.raises(ValueError, match="workspace"):
         store.add_artifact(job_id, "data", external, "digest", "fake", 30)
+
+
+def test_deleting_job_preserves_shared_source_registration(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    source_id = _source(store, tmp_path)
+    first = store.create_job(source_id, "first", {})
+    second = store.create_job(source_id, "second", {})
+    store.delete_job(first)
+    assert any(job["id"] == second for job in store.job_history())
+    with sqlite3.connect(store.database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM video_sources WHERE id=?", (source_id,)
+        ).fetchone()[0] == 1

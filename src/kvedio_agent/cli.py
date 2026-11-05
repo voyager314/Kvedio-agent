@@ -49,7 +49,9 @@ def _load_settings() -> Settings:
         raise typer.Exit(code=1) from None
     if settings is None:
         raise typer.Exit(code=0)
-    return settings.with_state(load_state())
+    resolved = settings.with_state(load_state())
+    store.cleanup_expired(Config.from_settings(resolved).retention_days)
+    return resolved
 
 
 def _print_models(settings: Settings) -> None:

@@ -487,7 +487,14 @@ class Store:
                 "SELECT source_id FROM jobs WHERE id=?", (job_id,)
             ).fetchone()
             connection.execute("DELETE FROM jobs WHERE id=?", (job_id,))
-            if source:
+            remaining = (
+                connection.execute(
+                    "SELECT 1 FROM jobs WHERE source_id=? LIMIT 1", (source["source_id"],)
+                ).fetchone()
+                if source
+                else None
+            )
+            if source and not remaining:
                 connection.execute("DELETE FROM video_sources WHERE id=?", (source["source_id"],))
         for row in artifact_paths:
             path = Path(row["path"]).resolve()

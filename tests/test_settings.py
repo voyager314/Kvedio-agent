@@ -45,6 +45,16 @@ def test_settings_resolve_requires_explicit_binding() -> None:
     assert settings.resolve("chat", "talk")[0] == "talk"
 
 
+def test_dotenv_is_not_read_for_credentials_or_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("PROVIDER_TOKEN", raising=False)
+    (tmp_path / ".env").write_text("PROVIDER_TOKEN=dotenv-secret", encoding="utf-8")
+    entry = ModelEntry(model="provider/model", roles=["chat"], api_key_env="PROVIDER_TOKEN")
+    assert entry.resolve_key() is None
+
+
 def test_settings_load_does_not_echo_invalid_values(tmp_path: Path) -> None:
     path = tmp_path / "settings.json"
     path.write_text(

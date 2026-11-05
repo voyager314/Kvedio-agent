@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from kvedio_agent.providers import (
+    LiteLLMChat,
     OpenAICompatibleASR,
     ProviderError,
     _parse_transcript,
@@ -46,3 +47,23 @@ def test_provider_errors_are_bounded_and_secret_free(
         provider.transcribe(audio, 0)
     assert raised.value.category == "provider_rate_limited_or_unavailable"
     assert "sentinel-secret" not in str(raised.value)
+
+
+def test_chat_adapter_suppresses_raw_exception_and_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHAT_TOKEN", "sentinel-secret")
+    model = ModelEntry(
+        model="provider/model", api_base="https://provider.example/v1",
+        api_key_env="CHAT_TOKEN", roles=["chat"],
+    )
+    adapter = LiteLLMChat(model)
+
+    def fail(**kwargs: object) -> None:
+        raise RuntimeError("authorization=sentinel-secret")
+
+    monkeypatch.setattr("litellm.completion", fail)
+    with pytest.raises(ProviderError) as raised:
+        adapter.complete("system", "prompt")
+    assert "sentinel-secret" not in str(raised.value)
+    assert raised.value.__cause__ is None
