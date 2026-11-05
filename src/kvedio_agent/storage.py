@@ -198,6 +198,17 @@ class Store:
             )
         return source_id
 
+    def find_source(self, path: Path, digest: str) -> str | None:
+        """Return a matching source registration without accepting stale content."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM video_sources WHERE path=? AND digest=? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (str(path.resolve()), digest),
+            ).fetchone()
+        return str(row["id"]) if row else None
+
     def create_job(
         self, source_id: str, objective: str, config_snapshot: dict[str, Any]
     ) -> str:
@@ -212,6 +223,37 @@ class Store:
                 (job_id, source_id, objective, _json(config_snapshot), now, now),
             )
         return job_id
+
+    def find_job(self, source_id: str, objective: str) -> str | None:
+        """Find the latest reusable job with the same source and objective."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM jobs WHERE source_id=? AND objective=? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (source_id, objective),
+            ).fetchone()
+        return str(row["id"]) if row else None
+
+    def set_job_status(self, job_id: str, status: str, current_stage: str | None = None) -> None:
+        """Update durable job state and its last visible stage."""
+
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE jobs SET status=?, current_stage=?, updated_at=? WHERE id=?",
+                (status, current_stage, _timestamp(), job_id),
+            )
+
+    def set_segment_status(
+        self, segment_id: str, status: str, artifact_id: str | None = None
+    ) -> None:
+        """Record a segment checkpoint after its generated output is durable."""
+
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE segments SET status=?, artifact_id=? WHERE id=?",
+                (status, artifact_id, segment_id),
+            )
 
     def upsert_stage(self, job_id: str, name: str, status: str, attempt: int = 0,
                      progress: float = 0, error_category: str | None = None) -> str:
@@ -255,9 +297,16 @@ class Store:
         resolved = path.resolve()
         if not resolved.is_relative_to(self.root):
             raise ValueError("artifact path must be inside the application workspace")
-        artifact_id = str(uuid.uuid4())
         created = datetime.now(UTC)
         with self._connect() as connection:
+            existing = connection.execute(
+                """SELECT id FROM artifacts WHERE job_id=? AND segment_id IS ?
+                   AND kind=? AND digest=? ORDER BY created_at DESC LIMIT 1""",
+                (job_id, segment_id, kind, digest),
+            ).fetchone()
+            if existing:
+                return str(existing["id"])
+            artifact_id = str(uuid.uuid4())
             connection.execute(
                 "INSERT INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (artifact_id, job_id, segment_id, kind, str(resolved), digest, producer,

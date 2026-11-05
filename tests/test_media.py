@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+from fractions import Fraction
+from pathlib import Path
+
+import av
+import pytest
+
+from kvedio_agent.config import Config
+from kvedio_agent.media import MediaProcessor, fingerprint, probe, validate_resume
+from kvedio_agent.storage import Store
+
+
+@pytest.fixture
+def sample_video(tmp_path: Path) -> Path:
+    path = tmp_path / "sample.mp4"
+    container = av.open(str(path), mode="w")
+    stream = container.add_stream("mpeg4", rate=2)
+    stream.width = 64
+    stream.height = 48
+    stream.pix_fmt = "yuv420p"
+    for index in range(4):
+        frame = av.VideoFrame(64, 48, "yuv420p")
+        for plane in frame.planes:
+            plane.update(bytes([index * 50]) * plane.buffer_size)
+        frame.pts = index
+        frame.time_base = Fraction(1, 2)
+        for packet in stream.encode(frame):
+            container.mux(packet)
+    for packet in stream.encode(None):
+        container.mux(packet)
+    container.close()
+    return path
+
+
+def test_probe_reads_stream_metadata_and_limits_duration(sample_video: Path) -> None:
+    result = probe(sample_video, Config(max_video_duration_seconds=10))
+    assert result.duration_ms == 2000
+    assert result.video_streams == 1
+    assert result.width == 64
+    with pytest.raises(ValueError, match="duration limit"):
+        probe(sample_video, Config(max_video_duration_seconds=1))
+
+
+def test_source_fingerprint_detects_mutation(sample_video: Path) -> None:
+    before = fingerprint(sample_video)
+    assert validate_resume(sample_video, before)
+    sample_video.write_bytes(sample_video.read_bytes() + b"changed")
+    assert not validate_resume(sample_video, before)
+
+
+def test_preprocess_creates_time_indexed_keyframes_and_resumes(
+    sample_video: Path, tmp_path: Path
+) -> None:
+    store = Store(tmp_path / "workspace")
+    config = Config(max_segment_duration_seconds=1, segment_overlap_seconds=0)
+    processor = MediaProcessor(store, config)
+    source_id, job_id, media = processor.preprocess(sample_video)
+    manifest_path = store.root / "artifacts" / fingerprint(sample_video).digest / "manifest.json"
+    assert media.duration_ms == 2000
+    assert manifest_path.exists()
+    _, resumed_job_id, _ = processor.preprocess(sample_video)
+    reopened = Store(tmp_path / "workspace")
+    assert resumed_job_id == job_id
+    assert reopened.job_history()[0]["id"] == job_id
+    assert source_id
+
+
+def test_probe_rejects_invalid_media(tmp_path: Path) -> None:
+    path = tmp_path / "invalid.mp4"
+    path.write_bytes(b"not media")
+    with pytest.raises(av.error.FFmpegError):
+        probe(path, Config())
