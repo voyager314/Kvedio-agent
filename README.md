@@ -76,6 +76,9 @@ timestamps, and prices must be checked with the provider before use. See
 ## Commands
 
 - `kvedio-agent workbench` opens the prompted terminal menu.
+- `kvedio-agent upload VIDEO` receives an MP4 in verified resumable chunks;
+  repeat it with `--upload-id ID` after an interrupted transfer.
+- `kvedio-agent uploads` lists durable local transfer state.
 - `kvedio-agent analyze VIDEO --objective "Find the decision and its evidence"`
   preprocesses and analyzes a local file.
 - `kvedio-agent jobs` lists persisted jobs.

@@ -19,6 +19,7 @@ from kvedio_agent.pipeline.jobs import StageScheduler, WorkUnit
 from kvedio_agent.pipeline.media import MediaProcessor, fingerprint
 from kvedio_agent.platform.config import Config
 from kvedio_agent.platform.costs import ProviderGate
+from kvedio_agent.platform.ingestion import LocalChunkIngestor
 from kvedio_agent.platform.providers import (
     LiteLLMChat,
     OpenAICompatibleASR,
@@ -385,6 +386,44 @@ def jobs_command() -> None:
     """List recent recoverable and completed video jobs."""
 
     _print_jobs()
+
+
+@app.command("uploads")
+def uploads_command() -> None:
+    """List local chunk transfers and their durable status."""
+
+    table = Table(title="Video uploads")
+    table.add_column("Upload")
+    table.add_column("Status")
+    table.add_column("Size")
+    table.add_column("Source")
+    for upload in store.upload_history():
+        table.add_row(
+            upload["id"], upload["status"], f"{upload['size_bytes']} bytes",
+            Path(upload["source_path"]).name,
+        )
+    console.print(table)
+
+
+@app.command("upload")
+def upload_command(
+    video: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    upload_id: Annotated[str | None, typer.Option("--upload-id")] = None,
+) -> None:
+    """Copy an MP4 into the local workspace with resumable verified chunks."""
+
+    try:
+        result = LocalChunkIngestor(store).ingest(video, upload_id)
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from None
+    console.print(
+        f"Upload {result.upload_id}: {result.acknowledged_chunks}/"
+        f"{result.total_chunks} chunks"
+    )
+    if result.completed and result.target_path:
+        console.print(f"Stored video: {result.target_path}")
+    else:
+        console.print(f"Resume with: kvedio-agent upload {video} --upload-id {result.upload_id}")
 
 
 @app.command("analyze")

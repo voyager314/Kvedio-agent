@@ -16,7 +16,7 @@ from typing import Any
 
 from kvedio_agent.platform.settings import config_dir
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _SECRET_FIELD = re.compile(r"(^|_)(api_key|token|password|secret|authorization)(_|$)", re.I)
 
 
@@ -269,7 +269,96 @@ class Store:
                     VALUES (3, CURRENT_TIMESTAMP);
                     """
                 )
+                version = 3
+            if version == 3:
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS uploads (
+                        id TEXT PRIMARY KEY,
+                        source_path TEXT NOT NULL,
+                        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+                        digest TEXT NOT NULL,
+                        chunk_size INTEGER NOT NULL CHECK (chunk_size > 0),
+                        status TEXT NOT NULL CHECK (status IN ('receiving', 'completed')),
+                        target_path TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS upload_chunks (
+                        upload_id TEXT NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
+                        chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+                        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+                        digest TEXT NOT NULL,
+                        acknowledged_at TEXT NOT NULL,
+                        PRIMARY KEY(upload_id, chunk_index)
+                    );
+                    INSERT INTO schema_version(version, applied_at)
+                    VALUES (4, CURRENT_TIMESTAMP);
+                    """
+                )
             self._ensure_evidence_search(connection)
+
+    def create_upload(
+        self, upload_id: str, source_path: Path, size_bytes: int,
+        digest: str, chunk_size: int,
+    ) -> None:
+        """Create a durable local transfer record before acknowledging any chunk."""
+
+        now = _timestamp()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO uploads VALUES (?, ?, ?, ?, ?, 'receiving', NULL, ?, ?)",
+                (upload_id, str(source_path.resolve()), size_bytes, digest, chunk_size, now, now),
+            )
+
+    def upload(self, upload_id: str) -> dict[str, Any] | None:
+        """Return transfer metadata and acknowledged chunk indexes."""
+
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM uploads WHERE id=?", (upload_id,)).fetchone()
+            if row is None:
+                return None
+            chunks = connection.execute(
+                "SELECT chunk_index, size_bytes, digest FROM upload_chunks "
+                "WHERE upload_id=? ORDER BY chunk_index", (upload_id,),
+            ).fetchall()
+        return {**dict(row), "chunks": [dict(item) for item in chunks]}
+
+    def upload_history(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return recent upload status without exposing source contents."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, source_path, size_bytes, status, target_path, updated_at "
+                "FROM uploads ORDER BY updated_at DESC LIMIT ?", (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def acknowledge_upload_chunk(
+        self, upload_id: str, chunk_index: int, size_bytes: int, digest: str
+    ) -> None:
+        """Record a chunk only after its bytes are durably written and verified."""
+
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO upload_chunks VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(upload_id, chunk_index) DO UPDATE SET "
+                "size_bytes=excluded.size_bytes, digest=excluded.digest, "
+                "acknowledged_at=excluded.acknowledged_at",
+                (upload_id, chunk_index, size_bytes, digest, _timestamp()),
+            )
+            connection.execute(
+                "UPDATE uploads SET updated_at=? WHERE id=?", (_timestamp(), upload_id)
+            )
+
+    def finish_upload(self, upload_id: str, target_path: Path) -> None:
+        """Mark a fully verified transfer complete with its immutable workspace path."""
+
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE uploads SET status='completed', target_path=?, updated_at=? WHERE id=?",
+                (str(target_path.resolve()), _timestamp(), upload_id),
+            )
 
     @staticmethod
     def _ensure_evidence_search(connection: sqlite3.Connection) -> None:

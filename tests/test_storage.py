@@ -130,5 +130,12 @@ def test_usage_schema_migrates_from_supported_versions(tmp_path: Path, version: 
     with sqlite3.connect(database) as connection:
         found = {row[1] for row in connection.execute("PRAGMA table_info(usage_records)")}
         current = connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-    assert current == 3
+    assert current == 4
     assert "attempt" in found
+    with sqlite3.connect(database) as connection:
+        tables = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert {"uploads", "upload_chunks"} <= tables
