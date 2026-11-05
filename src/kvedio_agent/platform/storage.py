@@ -235,6 +235,7 @@ class Store:
                 connection.execute(
                     "INSERT INTO schema_version(version, applied_at) VALUES (3, CURRENT_TIMESTAMP)"
                 )
+                version = 3
             if version == 1:
                 connection.executescript(
                     """

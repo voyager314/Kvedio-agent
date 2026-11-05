@@ -98,3 +98,37 @@ def test_recovery_requeues_running_work_and_evidence_is_idempotent(tmp_path: Pat
     assert store.recover_interrupted_work() == 1
     assert store.recoverable_jobs()[0]["id"] == job_id
     assert store.pending_segments(job_id, "audio")[0]["status"] == "pending"
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_usage_schema_migrates_from_supported_versions(tmp_path: Path, version: int) -> None:
+    root = tmp_path / f"workspace-{version}"
+    root.mkdir()
+    database = root / "kvedio.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE schema_version "
+            "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        connection.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY)")
+        if version >= 2:
+            columns = (
+                "id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), "
+                "stage TEXT NOT NULL, provider TEXT NOT NULL, call_key TEXT NOT NULL, "
+                "attempt INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL, "
+                "estimated_cost_usd REAL, actual_cost_usd REAL, input_tokens INTEGER, "
+                "output_tokens INTEGER, audio_seconds REAL, created_at TEXT NOT NULL, "
+                "finished_at TEXT, UNIQUE(job_id, provider, call_key)"
+            )
+            if version == 2:
+                columns = columns.replace("attempt INTEGER NOT NULL DEFAULT 1, ", "")
+            connection.execute(f"CREATE TABLE usage_records ({columns})")
+        connection.execute(
+            "INSERT INTO schema_version(version, applied_at) VALUES (?, 'test')", (version,)
+        )
+    Store(root)
+    with sqlite3.connect(database) as connection:
+        found = {row[1] for row in connection.execute("PRAGMA table_info(usage_records)")}
+        current = connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+    assert current == 3
+    assert "attempt" in found

@@ -277,6 +277,7 @@ class OpenAICompatibleVision:
             "model": self.model.model,
             "messages": [{"role": "user", "content": content}],
             "temperature": 0,
+            "max_tokens": 2048,
         }
         reservation = self._reserve(frames, start_ms)
         try:
@@ -322,7 +323,9 @@ class OpenAICompatibleVision:
                 self.model,
             ),
             self.gate.estimate_vision(
-                "Describe important visible events and on-screen text.", len(frames)
+                "Describe important visible events and on-screen text.",
+                len(frames),
+                output_tokens=2048,
             ),
         )
 

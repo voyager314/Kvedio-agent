@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from kvedio_agent.platform.costs import ProviderGate
+from kvedio_agent.platform.costs import BudgetExceededError, ProviderGate
 from kvedio_agent.platform.settings import ModelEntry
 from kvedio_agent.platform.storage import Store
 
@@ -112,3 +112,14 @@ def test_usage_summary_separates_estimated_only_and_reservations(tmp_path: Path)
     assert summary["estimated_only_calls"] == 1
     assert summary["estimated_only_cost_usd"] == pytest.approx(0.2)
     assert summary["reserved_cost_usd"] == pytest.approx(0.3)
+
+
+def test_budget_rejection_uses_specific_non_retryable_category(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    model = ModelEntry(
+        model="provider/model", roles=["chat"], input_cost_per_million=1,
+        output_cost_per_million=1,
+    )
+    gate = ProviderGate(store, model, max_job_cost_usd=0)
+    with pytest.raises(BudgetExceededError):
+        gate.reserve(_job(store, tmp_path), "chat", "over-budget", 0.01)

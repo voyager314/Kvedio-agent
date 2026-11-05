@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 
+from kvedio_agent.pipeline.benchmark import run_benchmark
 from kvedio_agent.pipeline.jobs import StageScheduler, WorkUnit
 from kvedio_agent.platform.providers import ProviderError
 from kvedio_agent.platform.storage import Store
@@ -155,3 +156,10 @@ def test_run_attempt_limit_overrides_scheduler_default(tmp_path: Path) -> None:
         lambda unit, value: None, max_attempts=2,
     )[0]
     assert calls == result.attempts == 2
+
+
+def test_benchmark_reports_serial_and_concurrent_modes() -> None:
+    serial, concurrent = run_benchmark(units=4, workers=2, unit_seconds=0)
+    assert serial.mode == "serial"
+    assert concurrent.mode == "concurrent"
+    assert serial.units == concurrent.units == 4

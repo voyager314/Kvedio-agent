@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from kvedio_agent.platform.costs import ProviderGate
 from kvedio_agent.platform.providers import (
     Completion,
     LiteLLMChat,
@@ -15,6 +16,7 @@ from kvedio_agent.platform.providers import (
     _parse_transcript,
 )
 from kvedio_agent.platform.settings import ModelEntry
+from kvedio_agent.platform.storage import Store
 
 
 def test_transcript_normalization_applies_segment_offset_and_word_timing() -> None:
@@ -122,3 +124,39 @@ def test_visual_observation_preserves_frame_source_timestamps(
     result = OpenAICompatibleVision(model).describe([(frame, 1250)], 1000, 1500)
     assert result.frame_times_ms == (1250,)
     assert result.start_ms == 1000
+
+
+def test_vision_usage_is_persisted_as_actual_cost(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VISION_TOKEN", "vision-secret")
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"image")
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    store = Store(tmp_path / "workspace")
+    source_id = store.register_source(source, 6, source.stat().st_mtime_ns, "digest")
+    job_id = store.create_job(source_id, "objective", {})
+    model = ModelEntry(
+        model="vision/model", api_base="https://provider.example/v1",
+        api_key_env="VISION_TOKEN", roles=["vision"],
+        input_cost_per_million=1, output_cost_per_million=2,
+    )
+
+    def response(*args: object, **kwargs: object) -> httpx.Response:
+        assert kwargs["json"]["max_tokens"] == 2048  # type: ignore[index]
+        request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+        return httpx.Response(
+            200, request=request,
+            json={"choices": [{"message": {"content": "A slide"}}],
+                  "usage": {"prompt_tokens": 20, "completion_tokens": 5}},
+        )
+
+    monkeypatch.setattr(httpx, "post", response)
+    provider = OpenAICompatibleVision(
+        model, gate=ProviderGate(store, model, None), job_id=job_id
+    )
+    provider.describe([(frame, 1250)], 1000, 1500)
+    summary = store.usage_summary(job_id)
+    assert summary["actual_cost_usd"] == pytest.approx(0.00003)
+    assert summary["estimated_only_calls"] == 0
