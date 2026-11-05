@@ -85,3 +85,27 @@ def test_scheduler_does_not_retry_permanent_failure(tmp_path: Path) -> None:
     )[0]
     assert calls == 1
     assert result.error_category == "provider_request_rejected"
+
+
+def test_segment_stays_retryable_when_output_commit_fails(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    job_id = _job(store, tmp_path)
+    segment_id = store.add_segment(job_id, "asr", 0, 1000)
+    scheduler = StageScheduler(store, 1, base_delay_seconds=0, seed=1)
+
+    def fail_commit(unit: WorkUnit, value: str) -> None:
+        raise OSError("simulated process interruption")
+
+    result = scheduler.run(
+        job_id,
+        "transcribe",
+        [WorkUnit(segment_id, 0, 1000, None)],
+        lambda unit: "provider result",
+        fail_commit,
+    )
+
+    assert result[0].error_category == "stage_output_commit_failed"
+    assert store.pending_segments(job_id, "asr")[0]["status"] == "retryable_failed"
+    assert store.job_events(job_id)[-1]["data_json"].find(
+        "stage_output_commit_failed"
+    ) >= 0

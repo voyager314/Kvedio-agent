@@ -82,7 +82,7 @@ class StageScheduler:
         if not unit_list:
             return []
         stage_id = self.store.upsert_stage(job_id, stage_name, "running")
-        results: list[WorkResult] = []
+        raw_results: list[WorkResult] = []
         with ThreadPoolExecutor(
             max_workers=self.max_workers, thread_name_prefix="kvedio-stage"
         ) as pool:
@@ -103,7 +103,7 @@ class StageScheduler:
                 for future in completed:
                     unit = pending.pop(future)
                     result = future.result()
-                    results.append(result)
+                    raw_results.append(result)
                     try:
                         next_unit = next(unit_iter)
                     except StopIteration:
@@ -111,8 +111,9 @@ class StageScheduler:
                     if not self._cancel.is_set():
                         submit(next_unit)
         start_by_id = {unit.id: unit.start_ms for unit in unit_list}
-        ordered = sorted(results, key=lambda result: start_by_id[result.unit_id])
+        ordered = sorted(raw_results, key=lambda result: start_by_id[result.unit_id])
         unit_by_id = {unit.id: unit for unit in unit_list}
+        committed_results: list[WorkResult] = []
         committed = 0
         failures = 0
         for result in ordered:
@@ -139,11 +140,19 @@ class StageScheduler:
                     job_id, "segment_failed", "Segment processing failed",
                     {"segment_id": unit.id, "error_category": error_category}, stage_id,
                 )
+            committed_results.append(
+                WorkResult(
+                    unit.id,
+                    result.value if error_category is None else None,
+                    error_category,
+                    result.attempts,
+                )
+            )
             self.store.upsert_stage(
                 job_id, stage_name, "running", attempt=result.attempts,
                 progress=(committed + failures) / len(unit_list),
             )
-        cancelled = self._cancel.is_set() or len(results) < len(unit_list)
+        cancelled = self._cancel.is_set() or len(raw_results) < len(unit_list)
         failed = failures > 0
         stage_status = "interrupted" if cancelled else "retryable_failed" if failed else "completed"
         self.store.upsert_stage(
@@ -151,7 +160,7 @@ class StageScheduler:
             attempt=max((result.attempts for result in ordered), default=0),
             progress=committed / len(unit_list),
         )
-        return ordered
+        return committed_results
 
     def _run_unit(self, unit: WorkUnit, worker: Callable[[WorkUnit], T]) -> WorkResult:
         attempts = 0

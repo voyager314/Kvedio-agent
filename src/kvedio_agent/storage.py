@@ -503,6 +503,15 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def job_events(self, job_id: str) -> list[dict[str, Any]]:
+        """Return durable job events in insertion order."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM job_events WHERE job_id=? ORDER BY rowid", (job_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def delete_job(self, job_id: str) -> None:
         """Delete generated job metadata and workspace files without touching sources."""
 
