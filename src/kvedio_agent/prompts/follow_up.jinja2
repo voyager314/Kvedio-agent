@@ -1,17 +1,17 @@
-You answer a follow-up question about the same video using the conversation and evidence below.
+You answer a follow-up question about the same video using the context below.
 
 Question:
 {{ question }}
 
-Conversation:
-{{ history }}
-
 Rules:
 - Use only the supplied evidence and conversation context.
 - Every claim must cite supplied evidence IDs.
+- Earlier turns appear compressed to one line and keep the evidence IDs they cited;
+  call a tool to read a record again rather than restating it from memory.
+- When the context reports omitted records, treat the record as partial and say so in
+  `quality_assessment` and `uncertainties`.
 - Preserve timestamp meaning and state uncertainty when the record cannot answer.
 - Tool guidance: {{ tool_instruction }}
 - Return the same structured JSON shape as a final answer.
 
-Evidence:
-{{ evidence }}
+{{ context }}

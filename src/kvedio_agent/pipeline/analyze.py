@@ -9,7 +9,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from kvedio_agent.pipeline.context import EvidenceIndex
+from kvedio_agent.pipeline.context import ContextAssembler, EvidenceIndex
 from kvedio_agent.pipeline.tools import JobToolRegistry, ToolCallError
 from kvedio_agent.platform.costs import ProviderGate
 from kvedio_agent.platform.prompting import PromptRenderer
@@ -94,11 +94,17 @@ class ContentLocation(BaseModel):
 
 
 class AnalysisService:
-    """Create segment facts, timeline summaries, answers, and durable follow-ups."""
+    """Create segment facts, timeline summaries, answers, and durable follow-ups.
+
+    Every request this service sends is built by one assembler under one token
+    ceiling. No method appends to a prompt a previous call produced, so neither a
+    long conversation nor a long tool round can push a request past that ceiling.
+    """
 
     def __init__(
         self, store: Store, index: EvidenceIndex, model: TextModel,
         gate: ProviderGate | None = None, job_id: str | None = None,
+        assembler: ContextAssembler | None = None,
     ) -> None:
         self.store = store
         self.index = index
@@ -106,6 +112,7 @@ class AnalysisService:
         self.gate = gate
         self.job_id = job_id
         self.prompts = PromptRenderer()
+        self.assembler = assembler or ContextAssembler(index.budget)
 
     def understand_segment(
         self, job_id: str, start_ms: int, end_ms: int, retention_days: int = 30
@@ -115,9 +122,8 @@ class AnalysisService:
         evidence = self.store.evidence_for_range(job_id, start_ms, end_ms)
         if not evidence:
             raise ValueError("segment has no evidence")
-        prompt = self.prompts.render(
-            "segment_extraction", evidence=_format_evidence(evidence)
-        )
+        assembled = self.assembler.assemble(evidence=evidence)
+        prompt = self.prompts.render("segment_extraction", context=assembled.text)
         data = _parse_json(self._complete("segment", prompt))
         fact = SegmentFact(
             start_ms=start_ms,
@@ -127,7 +133,7 @@ class AnalysisService:
             entities=tuple(data.get("entities", [])),
             uncertainty=data.get("uncertainty"),
         )
-        allowed = {item["id"] for item in evidence}
+        allowed = set(assembled.evidence_ids)
         if not fact.summary or not fact.evidence_ids or not set(fact.evidence_ids) <= allowed:
             raise ProviderError("analysis_invalid_citation", retryable=False)
         self.store.add_artifact_summary(
@@ -153,75 +159,52 @@ class AnalysisService:
         )
 
     def synthesize_timeline(self, job_id: str, retention_days: int = 30) -> list[TimelineChapter]:
-        """Reduce stored segment summaries into ordered video chapters."""
+        """Reduce stored segment summaries into ordered video chapters.
 
-        summaries = self.store.evidence_for_modality(job_id, "segment_summary")
-        if not summaries:
-            return []
-        prompt = self.prompts.render(
-            "timeline_reduction", evidence=_format_evidence(summaries)
-        )
-        response = self._complete("timeline", prompt)
-        data = _parse_json(response)
-        raw_chapters = data.get("chapters", [])
-        if not isinstance(raw_chapters, list):
-            raise ProviderError("analysis_invalid_response", retryable=False)
-        available = {item["id"] for item in summaries}
+        Summaries are reduced in as many passes as the context budget requires, so a
+        recording longer than one request can hold yields chapters for its whole
+        length instead of chapters for its opening.
+        """
+
+        pending = self.store.evidence_for_modality(job_id, "segment_summary")
         chapters: list[TimelineChapter] = []
-        try:
-            for raw in raw_chapters:
-                chapter = TimelineChapter.model_validate(raw)
-                if not chapter.valid_range() or not set(chapter.evidence_ids) <= available:
-                    raise ProviderError("analysis_invalid_citation", retryable=False)
-                self.store.add_artifact_summary(
-                    job_id, "timeline_summary", chapter.start_ms, chapter.end_ms,
-                    json.dumps(chapter.model_dump(), ensure_ascii=False),
-                    "timeline-agent", retention_days,
-                    evidence_ids=chapter.evidence_ids,
-                )
-                chapters.append(chapter)
-        except ValidationError:
-            raise ProviderError("analysis_invalid_response", retryable=False) from None
+        while pending:
+            assembled = self.assembler.assemble(evidence=pending)
+            if not assembled.evidence_ids:
+                raise ProviderError("analysis_context_budget_too_small", retryable=False)
+            prompt = self.prompts.render("timeline_reduction", context=assembled.text)
+            data = _parse_json(self._complete("timeline", prompt))
+            raw_chapters = data.get("chapters", [])
+            if not isinstance(raw_chapters, list):
+                raise ProviderError("analysis_invalid_response", retryable=False)
+            available = set(assembled.evidence_ids)
+            try:
+                for raw in raw_chapters:
+                    chapter = TimelineChapter.model_validate(raw)
+                    if not chapter.valid_range() or not set(chapter.evidence_ids) <= available:
+                        raise ProviderError("analysis_invalid_citation", retryable=False)
+                    self.store.add_artifact_summary(
+                        job_id, "timeline_summary", chapter.start_ms, chapter.end_ms,
+                        json.dumps(chapter.model_dump(), ensure_ascii=False),
+                        "timeline-agent", retention_days,
+                        evidence_ids=chapter.evidence_ids,
+                    )
+                    chapters.append(chapter)
+            except ValidationError:
+                raise ProviderError("analysis_invalid_response", retryable=False) from None
+            pending = pending[len(assembled.evidence_ids):]
         return chapters
 
     def analyze(self, job_id: str, objective: str) -> AnalysisResult:
-        """Answer an objective from bounded evidence and validate citations."""
+        """Answer an objective from retrieved evidence and the chapter map."""
 
-        context = self.index.retrieve(job_id, objective)
-        context.extend(self.store.evidence_for_modality(job_id, "timeline_summary"))
-        context = list({item["id"]: item for item in context}.values())
-        context.sort(key=lambda item: (item["start_ms"], item["end_ms"]))
-        if not context:
+        evidence = self.index.retrieve(job_id, objective)
+        chapters = self.store.evidence_for_modality(job_id, "timeline_summary")
+        if not evidence and not chapters:
             raise ValueError("no matching evidence is available")
-        registry = JobToolRegistry(self.store, job_id)
-        prompt = self.prompts.render(
-            "final_answer", objective=objective, evidence=_format_evidence(context)
+        return self._answer_with_tools(
+            "answer", job_id, "final_answer", {"objective": objective}, evidence, chapters
         )
-        completion = self._complete_result("answer", prompt, registry.schemas())
-        for _ in range(3):
-            if not completion.tool_calls:
-                break
-            try:
-                tool_results = [
-                    registry.call(call["name"], json.loads(call["arguments"]))
-                    for call in completion.tool_calls
-                ]
-            except (json.JSONDecodeError, ToolCallError):
-                raise ProviderError("analysis_invalid_tool_call", retryable=False) from None
-            prompt += "\n\nTool results:\n" + "\n".join(
-                json.dumps(result, ensure_ascii=False) for result in tool_results
-            )
-            completion = self._complete_result("answer", prompt, registry.schemas())
-        if completion.tool_calls:
-            raise ProviderError("analysis_tool_call_limit", retryable=False)
-        try:
-            result = AnalysisResult.model_validate(_parse_json(completion.content))
-        except (ValidationError, ValueError):
-            raise ProviderError("analysis_invalid_response", retryable=False) from None
-        available = {item["id"] for item in context}
-        if any(not set(claim.evidence_ids).issubset(available) for claim in result.claims):
-            raise ProviderError("analysis_invalid_citation", retryable=False)
-        return result
 
     def locate(self, job_id: str, start_ms: int, end_ms: int) -> ContentLocation:
         """Return original evidence overlapping the requested source-relative range."""
@@ -255,9 +238,8 @@ class AnalysisService:
         evidence = self.store.evidence_for_range(job_id, start_ms, end_ms)
         if not evidence:
             return "No evidence was produced for this interval."
-        prompt = self.prompts.render(
-            "milestone_summary", evidence=_format_evidence(evidence)
-        )
+        assembled = self.assembler.assemble(evidence=evidence)
+        prompt = self.prompts.render("milestone_summary", context=assembled.text)
         data = _parse_json(self._complete("milestone", prompt))
         summary = data.get("summary")
         if not isinstance(summary, str) or not summary.strip():
@@ -267,53 +249,87 @@ class AnalysisService:
     def follow_up(
         self, job_id: str, conversation_id: str, question: str, history_limit: int = 12
     ) -> AnalysisResult:
-        """Persist a user question and cited answer in a recoverable conversation."""
+        """Persist a user question and cited answer in a recoverable conversation.
+
+        history_limit bounds how many stored turns are considered; the assembler then
+        decides how many of those survive verbatim, so conversation length changes what
+        a request contains but never how large it is.
+        """
 
         messages = self.store.conversation_messages(conversation_id)[-history_limit:]
         self.store.add_message(conversation_id, "user", question)
-        context = self.index.retrieve(job_id, question)
-        if not context:
-            context = self.store.recent_evidence(job_id, self.index.budget.max_items)
-        history = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
-        registry = JobToolRegistry(self.store, job_id)
-        tool_instruction = self.prompts.render("tool_selection")
-        prompt = self.prompts.render(
-            "follow_up", question=question, history=history,
-            evidence=_format_evidence(context), tool_instruction=tool_instruction,
+        evidence = self.index.retrieve(job_id, question)
+        if not evidence:
+            evidence = self.store.recent_evidence(job_id, self.index.budget.max_evidence_items)
+        chapters = self.store.evidence_for_modality(job_id, "timeline_summary")
+        result = self._answer_with_tools(
+            "follow_up", job_id, "follow_up",
+            {"tool_instruction": self.prompts.render("tool_selection"), "question": question},
+            evidence, chapters, messages,
         )
-        completion = self._complete_result("follow_up", prompt, registry.schemas())
-        for _ in range(3):
-            if not completion.tool_calls:
-                break
-            tool_results = []
-            for call in completion.tool_calls:
-                try:
-                    arguments = json.loads(call["arguments"])
-                    tool_result = registry.call(call["name"], arguments)
-                except (json.JSONDecodeError, ToolCallError):
-                    raise ProviderError("analysis_invalid_tool_call", retryable=False) from None
-                for item in tool_result.get("evidence", []):
-                    row = self.store.evidence_by_id(item["evidence_id"])
-                    if row is not None and row["id"] not in {entry["id"] for entry in context}:
-                        context.append(row)
-                tool_results.append(json.dumps(tool_result, ensure_ascii=False))
-            prompt += "\n\nTool results:\n" + "\n".join(tool_results)
-            completion = self._complete_result("follow_up", prompt, registry.schemas())
-        if completion.tool_calls:
-            raise ProviderError("analysis_tool_call_limit", retryable=False)
-        response = completion.content
-        try:
-            result = AnalysisResult.model_validate(_parse_json(response))
-        except (ValidationError, ValueError):
-            raise ProviderError("analysis_invalid_response", retryable=False) from None
         evidence_ids = [
             evidence_id for claim in result.claims for evidence_id in claim.evidence_ids
         ]
-        available = {item["id"] for item in context}
-        if not set(evidence_ids) <= available:
-            raise ProviderError("analysis_invalid_citation", retryable=False)
         self.store.add_message(conversation_id, "assistant", result.model_dump_json(), evidence_ids)
         return result
+
+    def _answer_with_tools(
+        self, stage: str, job_id: str, template: str, variables: dict[str, Any],
+        evidence: list[dict[str, Any]], chapters: list[dict[str, Any]],
+        history: list[dict[str, Any]] | None = None, max_rounds: int = 3,
+    ) -> AnalysisResult:
+        """Answer one question under the budget, folding tool output into a rebuilt context.
+
+        Each round assembles the whole context again rather than appending to the
+        previous prompt, so accumulated tool output cannot carry a request past the
+        ceiling. Evidence a tool discovers joins the citable set for later rounds, and
+        a claim may cite only what the assembled context actually contained.
+        stage: usage-accounting label for the calls this answer makes.
+        template: prompt template name; it receives the assembled block as `context`.
+        variables: remaining template variables, none of which may carry evidence.
+        evidence: retrieved rows; extended in place when a tool discovers more.
+        Raises a provider error when the rounds run out with a tool call outstanding.
+        """
+
+        registry = JobToolRegistry(self.store, job_id)
+        tool_results: list[dict[str, Any]] = []
+        for _ in range(max_rounds + 1):
+            assembled = self.assembler.assemble(
+                chapters=chapters, history=history or [],
+                evidence=evidence, tool_results=tool_results,
+            )
+            prompt = self.prompts.render(template, context=assembled.text, **variables)
+            completion = self._complete_result(stage, prompt, registry.schemas())
+            if not completion.tool_calls:
+                return _validated(completion.content, set(assembled.evidence_ids))
+            tool_results.extend(self._run_tools(completion.tool_calls, registry, evidence))
+        raise ProviderError("analysis_tool_call_limit", retryable=False)
+
+    def _run_tools(
+        self, calls: tuple[dict[str, Any], ...], registry: JobToolRegistry,
+        evidence: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Execute one round of tool calls and admit the evidence they discovered.
+
+        evidence is extended in place with returned rows that are not already present,
+        which is what makes a tool-discovered row citable in the next round.
+        Raises a provider error when a call is malformed or names an unknown tool.
+        """
+
+        results: list[dict[str, Any]] = []
+        known = {item["id"] for item in evidence}
+        for call in calls:
+            try:
+                result = registry.call(call["name"], json.loads(call["arguments"]))
+            except (json.JSONDecodeError, ToolCallError):
+                raise ProviderError("analysis_invalid_tool_call", retryable=False) from None
+            for item in result.get("evidence", []):
+                row = self.store.evidence_by_id(item["evidence_id"])
+                if row is not None and row["id"] not in known:
+                    evidence.append(row)
+                    known.add(row["id"])
+            results.append(result)
+        return results
 
     def _complete(self, stage: str, prompt: str) -> str:
         return self._complete_result(stage, prompt).content
@@ -352,12 +368,16 @@ class AnalysisService:
         return response
 
 
-def _format_evidence(items: list[dict[str, Any]]) -> str:
-    return "\n".join(
-        f"[{item['id']}] {item['start_ms']}..{item['end_ms']} ms "
-        f"{item['modality']}: {item.get('content') or ''}"
-        for item in items
-    )
+def _validated(response: str, available: set[str]) -> AnalysisResult:
+    """Parse one analysis result, rejecting any claim that cites unsupplied evidence."""
+
+    try:
+        result = AnalysisResult.model_validate(_parse_json(response))
+    except (ValidationError, ValueError):
+        raise ProviderError("analysis_invalid_response", retryable=False) from None
+    if any(not set(claim.evidence_ids) <= available for claim in result.claims):
+        raise ProviderError("analysis_invalid_citation", retryable=False)
+    return result
 
 
 def _parse_json(response: str) -> dict[str, Any]:

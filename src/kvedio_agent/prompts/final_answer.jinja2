@@ -10,10 +10,11 @@ Rules:
 - If evidence is insufficient, state the uncertainty instead of guessing.
 - Use the supplied local file tools when the objective refers to local files.
 - Include a concise execution plan, stage trace, and quality assessment.
+- When the context reports omitted records, treat the record as partial and say so in
+  `quality_assessment` and `uncertainties`.
 
 Return one JSON object with exactly these keys:
 `objective`, `plan`, `claims`, `uncertainties`, `quality_assessment`, `stage_trace`.
 Each claim has `text`, `evidence_ids`, and `confidence` from 0 to 1.
 
-Evidence:
-{{ evidence }}
+{{ context }}
