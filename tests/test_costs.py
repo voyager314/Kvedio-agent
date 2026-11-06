@@ -18,7 +18,7 @@ def _job(store: Store, tmp_path: Path) -> str:
 
 def test_unknown_cost_is_rejected_when_budget_is_enabled(tmp_path: Path) -> None:
     store = Store(tmp_path / "workspace")
-    model = ModelEntry(model="provider/model", roles=["asr"], api_key_env="TOKEN")
+    model = ModelEntry(model="provider/model", roles=["asr"], api_key="TOKEN")
     gate = ProviderGate(store, model, max_job_cost_usd=1)
     with pytest.raises(ValueError, match="unknown"):
         gate.reserve(_job(store, tmp_path), "asr", "segment-1", None)
@@ -27,7 +27,7 @@ def test_unknown_cost_is_rejected_when_budget_is_enabled(tmp_path: Path) -> None
 def test_cost_reservation_and_settlement_are_idempotent(tmp_path: Path) -> None:
     store = Store(tmp_path / "workspace")
     model = ModelEntry(
-        model="provider/model", roles=["chat"], api_key_env="TOKEN",
+        model="provider/model", roles=["chat"], api_key="TOKEN",
         input_cost_per_million=1, output_cost_per_million=2,
     )
     gate = ProviderGate(store, model, max_job_cost_usd=1)
@@ -45,7 +45,7 @@ def test_cost_reservation_and_settlement_are_idempotent(tmp_path: Path) -> None:
 def test_failed_call_remains_uncertain_and_blocks_duplicate_dispatch(tmp_path: Path) -> None:
     store = Store(tmp_path / "workspace")
     model = ModelEntry(
-        model="provider/model", roles=["chat"], api_key_env="TOKEN",
+        model="provider/model", roles=["chat"], api_key="TOKEN",
         input_cost_per_million=1, output_cost_per_million=2,
     )
     gate = ProviderGate(store, model, max_job_cost_usd=1)
@@ -60,7 +60,7 @@ def test_failed_call_remains_uncertain_and_blocks_duplicate_dispatch(tmp_path: P
 def test_retryable_failure_creates_a_new_attempt(tmp_path: Path) -> None:
     store = Store(tmp_path / "workspace")
     model = ModelEntry(
-        model="provider/model", roles=["chat"], api_key_env="TOKEN",
+        model="provider/model", roles=["chat"], api_key="TOKEN",
         input_cost_per_million=1, output_cost_per_million=2,
     )
     gate = ProviderGate(store, model, max_job_cost_usd=1)

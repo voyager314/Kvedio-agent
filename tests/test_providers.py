@@ -39,7 +39,7 @@ def test_provider_errors_are_bounded_and_secret_free(
     audio.write_bytes(b"audio")
     provider = OpenAICompatibleASR(
         ModelEntry(model="asr", api_base="https://provider.example/v1",
-                   api_key_env="ASR_TOKEN", roles=["asr"])
+                   api_key="ASR_TOKEN", roles=["asr"])
     )
 
     def fail(*args: object, **kwargs: object) -> httpx.Response:
@@ -59,7 +59,7 @@ def test_chat_adapter_suppresses_raw_exception_and_secret(
     monkeypatch.setenv("CHAT_TOKEN", "sentinel-secret")
     model = ModelEntry(
         model="provider/model", api_base="https://provider.example/v1",
-        api_key_env="CHAT_TOKEN", roles=["chat"],
+        api_key="CHAT_TOKEN", roles=["chat"],
     )
     adapter = LiteLLMChat(model)
 
@@ -76,7 +76,7 @@ def test_chat_adapter_suppresses_raw_exception_and_secret(
 def test_chat_completion_returns_provider_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CHAT_TOKEN", "chat-secret")
     model = ModelEntry(
-        model="provider/model", api_key_env="CHAT_TOKEN", roles=["chat"],
+        model="provider/model", api_key="CHAT_TOKEN", roles=["chat"],
         input_cost_per_million=1, output_cost_per_million=2,
     )
 
@@ -105,7 +105,7 @@ def test_chat_adapter_accepts_tool_call_without_text_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CHAT_TOKEN", "chat-secret")
-    model = ModelEntry(model="provider/model", api_key_env="CHAT_TOKEN", roles=["chat"])
+    model = ModelEntry(model="provider/model", api_key="CHAT_TOKEN", roles=["chat"])
 
     class Function:
         name = "search_evidence"
@@ -130,6 +130,7 @@ def test_chat_adapter_accepts_tool_call_without_text_content(
     result = LiteLLMChat(model).complete(
         "system", "prompt", [{"type": "function", "function": {"name": "search_evidence"}}]
     )
+    assert captured["api_key"] == "CHAT_TOKEN"
     assert result.content == ""
     assert result.tool_calls[0]["name"] == "search_evidence"
     assert result.tool_calls[0]["arguments"] == '{"query": "launch"}'
@@ -144,7 +145,7 @@ def test_visual_observation_preserves_frame_source_timestamps(
     frame.write_bytes(b"jpeg")
     model = ModelEntry(
         model="vision/model", api_base="https://provider.example/v1",
-        api_key_env="VISION_TOKEN", roles=["vision"],
+        api_key="VISION_TOKEN", roles=["vision"],
     )
 
     def response(*args: object, **kwargs: object) -> httpx.Response:
@@ -174,7 +175,7 @@ def test_vision_usage_is_persisted_as_actual_cost(
     job_id = store.create_job(source_id, "objective", {})
     model = ModelEntry(
         model="vision/model", api_base="https://provider.example/v1",
-        api_key_env="VISION_TOKEN", roles=["vision"],
+        api_key="VISION_TOKEN", roles=["vision"],
         input_cost_per_million=1, output_cost_per_million=2,
     )
 

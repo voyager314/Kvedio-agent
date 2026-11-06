@@ -193,12 +193,29 @@ class AnalysisService:
         context.sort(key=lambda item: (item["start_ms"], item["end_ms"]))
         if not context:
             raise ValueError("no matching evidence is available")
+        registry = JobToolRegistry(self.store, job_id)
         prompt = self.prompts.render(
             "final_answer", objective=objective, evidence=_format_evidence(context)
         )
-        response = self._complete("answer", prompt)
+        completion = self._complete_result("answer", prompt, registry.schemas())
+        for _ in range(3):
+            if not completion.tool_calls:
+                break
+            try:
+                tool_results = [
+                    registry.call(call["name"], json.loads(call["arguments"]))
+                    for call in completion.tool_calls
+                ]
+            except (json.JSONDecodeError, ToolCallError):
+                raise ProviderError("analysis_invalid_tool_call", retryable=False) from None
+            prompt += "\n\nTool results:\n" + "\n".join(
+                json.dumps(result, ensure_ascii=False) for result in tool_results
+            )
+            completion = self._complete_result("answer", prompt, registry.schemas())
+        if completion.tool_calls:
+            raise ProviderError("analysis_tool_call_limit", retryable=False)
         try:
-            result = AnalysisResult.model_validate(_parse_json(response))
+            result = AnalysisResult.model_validate(_parse_json(completion.content))
         except (ValidationError, ValueError):
             raise ProviderError("analysis_invalid_response", retryable=False) from None
         available = {item["id"] for item in context}

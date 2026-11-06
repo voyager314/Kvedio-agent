@@ -1,19 +1,13 @@
-"""User-owned model settings and first-run initialization.
-
-The driver reads one JSON settings file below the user's home directory. Secret
-values are resolved only from operating-system environment variables named by
-the settings file; the file never accepts or emits a secret value.
-"""
+"""User-owned model settings and first-run initialization."""
 
 from __future__ import annotations
 
 import json
-import os
 from importlib import resources
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from rich.console import Console
 from rich.panel import Panel
 
@@ -85,16 +79,13 @@ def _strip_jsonc(text: str) -> str:
 
 
 class ModelEntry(BaseModel):
-    """A provider connection and the roles it is allowed to serve.
-
-    api_key_env is an environment variable name, never the secret value.
-    """
+    """A provider connection, credential, and the roles it is allowed to serve."""
 
     model_config = ConfigDict(extra="forbid")
 
     model: str = Field(min_length=1)  # Provider model identifier sent on each call.
     api_base: str | None = None  # Provider endpoint URL, or None for SDK defaults.
-    api_key_env: str | None = None  # Environment variable name, never a secret value.
+    api_key: str | None = None  # Provider credential stored in the user-owned settings file.
     roles: list[Role] = Field(min_length=1)  # Allowed roles: chat, asr, and vision.
     note: str | None = None  # User-owned non-secret label, or None when absent.
     timeout_seconds: float = Field(default=120, gt=0)  # Positive synchronous timeout, seconds.
@@ -108,19 +99,10 @@ class ModelEntry(BaseModel):
     # USD per audio minute; None is unknown.
     audio_cost_per_minute: float | None = Field(default=None, ge=0)
 
-    @model_validator(mode="before")
-    @classmethod
-    def reject_secret_fields(cls, value: Any) -> Any:
-        """Reject legacy secret-shaped fields without echoing their values."""
-
-        if isinstance(value, dict) and "api_key" in value:
-            raise ValueError("api_key is not accepted; use api_key_env")
-        return value
-
     def resolve_key(self) -> str | None:
-        """Return the environment value named by api_key_env."""
+        """Return the provider credential configured for this model."""
 
-        return os.environ.get(self.api_key_env) if self.api_key_env else None
+        return self.api_key
 
 
 class RuntimeState(BaseModel):
@@ -216,7 +198,7 @@ def render_reference() -> str:
 
 
 def ensure_settings(console: Console) -> Settings | None:
-    """Create the first-run template and return no settings until it is edited."""
+    """Create the full first-run configuration template and return no settings."""
 
     path = settings_path()
     if path.exists():
@@ -225,8 +207,10 @@ def ensure_settings(console: Console) -> Settings | None:
     path.write_text(render_template(), encoding="utf-8")
     console.print(
         Panel(
-            f"Created provider-free settings template at\n[dim]{path}[/dim]\n\n"
-            "Add model entries, role bindings, and environment variable names, then run again.",
+            f"Created complete settings template at\n[dim]{path}[/dim]\n\n"
+            "Replace every REPLACE_WITH_* value with your provider details and API keys, "
+            "then run again. Optional limits, prices, "
+            "model tuning, role bindings, and runtime parameters are included.",
             title="First run",
             border_style="green",
         )

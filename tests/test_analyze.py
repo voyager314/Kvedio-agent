@@ -47,6 +47,53 @@ def test_analysis_validates_claim_citations(tmp_path: Path) -> None:
     assert "launch approved" in model.prompts[0]
 
 
+def test_initial_analysis_can_read_referenced_local_file(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    job_id, evidence_id, _ = _job(store, tmp_path)
+    reference = tmp_path / "context notes.txt"
+    reference.write_text("The project name is Aurora.", encoding="utf-8")
+
+    class FileModel:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.prompts: list[str] = []
+
+        def complete(
+            self, system: str, prompt: str,
+            tools: list[dict[str, object]] | None = None,
+        ) -> Completion:
+            self.calls += 1
+            self.prompts.append(prompt)
+            if self.calls == 1:
+                return Completion(
+                    "",
+                    tool_calls=(
+                        {
+                            "id": "read-1", "name": "read_file",
+                            "arguments": json.dumps({"path": str(reference)}),
+                        },
+                    ),
+                )
+            return Completion(json.dumps({
+                "objective": "Use context notes",
+                "plan": ["read notes", "check video evidence"],
+                "claims": [{
+                    "text": "The transcript records approval.",
+                    "evidence_ids": [evidence_id], "confidence": 0.9,
+                }],
+                "uncertainties": [],
+                "quality_assessment": "Video evidence supports the claim.",
+            }))
+
+    model = FileModel()
+    result = AnalysisService(store, EvidenceIndex(store), model).analyze(
+        job_id, "Use context notes to explain launch approval"
+    )
+
+    assert result.claims[0].evidence_ids == [evidence_id]
+    assert "The project name is Aurora." in model.prompts[1]
+
+
 def test_locate_returns_original_timestamped_evidence(tmp_path: Path) -> None:
     store = Store(tmp_path / "workspace")
     job_id, evidence_id, _ = _job(store, tmp_path)

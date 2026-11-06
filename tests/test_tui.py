@@ -7,6 +7,7 @@ from kvedio_agent.interface.tui import (
     event_lines,
     evidence_lines,
     job_label,
+    parse_file_references,
     usage_lines,
 )
 from kvedio_agent.platform.storage import Store
@@ -33,3 +34,24 @@ def test_workbench_app_composes_without_network_calls(tmp_path: Path) -> None:
     app = WorkbenchApp(Store(tmp_path / "workspace"))
     assert app.selected_job_id is None
     assert app.CSS
+
+
+def test_at_references_resolve_multiple_paths_with_spaces(tmp_path: Path) -> None:
+    first = tmp_path / "meeting video.mp4"
+    second = tmp_path / "notes file.txt"
+    first.write_bytes(b"video")
+    second.write_text("agenda", encoding="utf-8")
+
+    paths, objective = parse_file_references(
+        f'Analyze @"{first}" with context @"{second}"'
+    )
+
+    assert paths == [first.resolve(), second.resolve()]
+    assert objective == "Analyze with context"
+
+
+def test_at_reference_reports_missing_path(tmp_path: Path) -> None:
+    import pytest
+
+    with pytest.raises(FileNotFoundError):
+        parse_file_references(f'Analyze @"{tmp_path / "missing file.txt"}"')

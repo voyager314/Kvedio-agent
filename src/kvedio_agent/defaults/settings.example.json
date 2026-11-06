@@ -1,15 +1,78 @@
 {
-  "models": {},
-  "active": {},
+  // Each key under models is a user-chosen name referenced by active.
+  "models": {
+    "chat-model": {
+      // Provider model identifier; replace all REPLACE_WITH_* values before use.
+      "model": "REPLACE_WITH_PROVIDER_CHAT_MODEL_ID",
+      // OpenAI-compatible API base URL. Chat may omit this only when the SDK has a provider default.
+      "api_base": "https://REPLACE_WITH_PROVIDER_ENDPOINT/v1",
+      // Provider API key. Keep this user-owned file private.
+      "api_key": "REPLACE_WITH_CHAT_API_KEY",
+      // Roles this connection is permitted to serve: chat, asr, vision.
+      "roles": ["chat"],
+      // Optional user-owned description; it must not contain a secret.
+      "note": "OpenAI-compatible chat or tool-calling model",
+      // Per-call timeout in seconds and maximum retry attempts.
+      "timeout_seconds": 120,
+      "max_attempts": 3,
+      // Request rate limit per minute; null means no local limit.
+      "requests_per_minute": null,
+      // USD per million input/output tokens; null means the price is unknown.
+      "input_cost_per_million": null,
+      "output_cost_per_million": null,
+      // USD per audio minute; null means the price is unknown.
+      "audio_cost_per_minute": null
+    },
+    "asr-model": {
+      "model": "REPLACE_WITH_PROVIDER_ASR_MODEL_ID",
+      "api_base": "https://REPLACE_WITH_PROVIDER_ENDPOINT/v1",
+      "api_key": "REPLACE_WITH_ASR_API_KEY",
+      "roles": ["asr"],
+      "note": "OpenAI-compatible audio transcription endpoint",
+      // ASR requests may take longer than text requests.
+      "timeout_seconds": 300,
+      "max_attempts": 3,
+      "requests_per_minute": null,
+      "input_cost_per_million": null,
+      "output_cost_per_million": null,
+      "audio_cost_per_minute": null
+    },
+    "vision-model": {
+      "model": "REPLACE_WITH_PROVIDER_VISION_MODEL_ID",
+      "api_base": "https://REPLACE_WITH_PROVIDER_ENDPOINT/v1",
+      "api_key": "REPLACE_WITH_VISION_API_KEY",
+      "roles": ["vision"],
+      "note": "OpenAI-compatible chat completions model with image input",
+      "timeout_seconds": 120,
+      "max_attempts": 3,
+      "requests_per_minute": null,
+      "input_cost_per_million": null,
+      "output_cost_per_million": null,
+      "audio_cost_per_minute": null
+    }
+  },
+  // Select one model key for every role needed by a full video analysis.
+  "active": {
+    "chat": "chat-model",
+    "asr": "asr-model",
+    "vision": "vision-model"
+  },
+  // Runtime limits. Worker counts cap concurrent local/provider work.
   "runtime": {
+    // Maximum accepted source video duration in seconds.
     "max_video_duration_seconds": 7200,
+    // Generated job artifacts retained before cleanup; source videos are not removed.
     "retention_days": 30,
+    // Media segment window and overlap, in seconds.
     "max_segment_duration_seconds": 120,
     "segment_overlap_seconds": 2,
+    // Maximum concurrent preprocessing, ASR, and vision work units.
     "max_media_workers": 2,
     "max_asr_workers": 4,
     "max_vision_workers": 2,
+    // Global concurrency ceiling across work stages.
     "max_global_workers": 6,
+    // Per-job USD spend ceiling; null means no configured ceiling.
     "max_job_cost_usd": null
   }
 }

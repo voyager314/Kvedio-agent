@@ -21,20 +21,10 @@ def test_json_comments_preserve_urls_and_string_comment_markers() -> None:
     }
 
 
-def test_model_entry_resolves_only_environment_named_secret(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PROVIDER_TOKEN", "sensitive-value")
-    entry = ModelEntry(model="provider/model", roles=["chat"], api_key_env="PROVIDER_TOKEN")
+def test_model_entry_resolves_configured_secret() -> None:
+    entry = ModelEntry(model="provider/model", roles=["chat"], api_key="sensitive-value")
     assert entry.resolve_key() == "sensitive-value"
-    assert "sensitive-value" not in entry.model_dump_json()
-
-
-def test_model_entry_rejects_plaintext_or_legacy_api_key() -> None:
-    with pytest.raises(ValueError, match="api_key is not accepted"):
-        ModelEntry.model_validate(
-            {"model": "provider/model", "roles": ["chat"], "api_key": "sentinel-secret"}
-        )
+    assert "sensitive-value" in entry.model_dump_json()
 
 
 def test_settings_resolve_requires_explicit_binding() -> None:
@@ -46,20 +36,10 @@ def test_settings_resolve_requires_explicit_binding() -> None:
     assert settings.resolve("chat", "talk")[0] == "talk"
 
 
-def test_dotenv_is_not_read_for_credentials_or_paths(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.delenv("PROVIDER_TOKEN", raising=False)
-    (tmp_path / ".env").write_text("PROVIDER_TOKEN=dotenv-secret", encoding="utf-8")
-    entry = ModelEntry(model="provider/model", roles=["chat"], api_key_env="PROVIDER_TOKEN")
-    assert entry.resolve_key() is None
-
-
 def test_settings_load_does_not_echo_invalid_values(tmp_path: Path) -> None:
     path = tmp_path / "settings.json"
     path.write_text(
-        '{"models":{"bad":{"model":"x","roles":["chat"],"api_key":"sentinel-secret"}}}',
+        '{"models":{"bad":{"model":"x","roles":["invalid"],"api_key":"sentinel-secret"}}}',
         encoding="utf-8",
     )
     with pytest.raises(ValueError) as raised:
@@ -74,7 +54,7 @@ def test_invalid_runtime_is_rejected_without_echoing_values() -> None:
     assert "sentinel-secret" not in str(raised.value)
 
 
-def test_first_run_creates_provider_free_template(
+def test_first_run_creates_complete_model_template(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(settings_module, "config_dir", lambda: tmp_path)
@@ -82,10 +62,30 @@ def test_first_run_creates_provider_free_template(
 
     assert settings_module.ensure_settings(output) is None
     saved = Settings.load(tmp_path / "settings.json")
-    assert not saved.models
-    assert not saved.active
-    assert "api_key" not in (tmp_path / "settings.json").read_text(encoding="utf-8")
+    assert set(saved.models) == {"chat-model", "asr-model", "vision-model"}
+    assert set(saved.active) == {"chat", "asr", "vision"}
+    assert '"api_key":' in (tmp_path / "settings.json").read_text(encoding="utf-8")
     assert settings_module.ensure_settings(output) == saved
+
+
+def test_first_run_template_lists_all_model_role_and_runtime_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings_module, "config_dir", lambda: tmp_path)
+    settings_module.ensure_settings(Console(file=StringIO(), force_terminal=False))
+    saved = Settings.load(tmp_path / "settings.json")
+
+    assert set(saved.active) == {"chat", "asr", "vision"}
+    for role in ("chat", "asr", "vision"):
+        _, entry = saved.resolve(role)
+        assert entry.timeout_seconds > 0
+        assert entry.max_attempts > 0
+        assert entry.requests_per_minute is None
+        assert entry.input_cost_per_million is None
+        assert entry.output_cost_per_million is None
+        assert entry.audio_cost_per_minute is None
+    assert set(saved.runtime) == set(Config.model_fields)
+    Config.from_settings(saved)
 
 
 def test_runtime_defaults_match_local_video_limits() -> None:

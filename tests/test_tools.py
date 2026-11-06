@@ -52,3 +52,24 @@ def test_tool_schemas_forbid_extra_arguments(tmp_path: Path) -> None:
         schema["function"]["parameters"]["additionalProperties"] is False
         for schema in registry.schemas()
     )
+
+
+def test_agent_can_read_and_write_utf8_files_with_spaces(tmp_path: Path) -> None:
+    registry = JobToolRegistry(Store(tmp_path / "workspace"), "job")
+    target = tmp_path / "folder with spaces" / "notes.txt"
+
+    written = registry.call(
+        "write_file", {"path": str(target), "content": "会议结论"}
+    )
+    read = registry.call("read_file", {"path": str(target)})
+
+    assert written["path"] == str(target.resolve())
+    assert read["content"] == "会议结论"
+
+
+def test_file_tools_reject_oversized_content_and_extra_arguments(tmp_path: Path) -> None:
+    registry = JobToolRegistry(Store(tmp_path / "workspace"), "job")
+    with pytest.raises(ToolCallError):
+        registry.call("write_file", {"path": str(tmp_path / "x"), "content": "a" * 65537})
+    with pytest.raises(ToolCallError):
+        registry.call("read_file", {"path": str(tmp_path / "x"), "anywhere": True})

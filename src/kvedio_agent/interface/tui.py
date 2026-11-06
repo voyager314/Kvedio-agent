@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,26 @@ from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, St
 from kvedio_agent.pipeline.analyze import AnalysisResult
 from kvedio_agent.platform.ingestion import UploadProgress
 from kvedio_agent.platform.storage import Store
+
+
+def parse_file_references(value: str) -> tuple[list[Path], str]:
+    """Resolve @-referenced local files and return the remaining prompt text.
+
+    Quoted paths may contain spaces; unquoted paths end at whitespace. Relative
+    paths use the process working directory, and every reference must exist.
+    """
+
+    matches = list(re.finditer(r'(?<!\S)@"([^"\r\n]+)"|(?<!\S)@(\S+)', value))
+    paths = [
+        Path(match.group(1) or match.group(2)).expanduser().resolve(strict=True)
+        for match in matches
+    ]
+    if any(not path.is_file() for path in paths):
+        raise ValueError("Every @ reference must point to an existing file.")
+    objective = value
+    for match in reversed(matches):
+        objective = f"{objective[:match.start()]}{objective[match.end():]}"
+    return paths, re.sub(r"\s+", " ", objective).strip()
 
 
 def job_label(job: dict[str, Any]) -> str:
@@ -88,8 +109,8 @@ class WorkbenchApp(App[None]):
                 yield Static("Select a job", id="events")
                 yield Static("No evidence selected", id="evidence")
                 yield Static("No usage data", id="usage")
-        yield Input(placeholder="Upload MP4 path", id="upload")
-        yield Input(placeholder="Analysis objective for uploaded video", id="objective")
+        yield Input(placeholder='MP4 path or @"path with spaces.mp4"', id="upload")
+        yield Input(placeholder='Objective and optional @"file path" references', id="objective")
         yield Input(placeholder="Ask a follow-up for the selected job", id="ask")
         yield Footer()
 
@@ -133,20 +154,60 @@ class WorkbenchApp(App[None]):
         if event.input.id == "upload":
             upload = self.upload
             if event.value.strip() and upload is not None:
-                self._run_upload(Path(event.value.strip()), upload)
+                try:
+                    references, _ = parse_file_references(event.value.strip())
+                    source = references[0] if references else Path(event.value.strip()).expanduser()
+                    if source.suffix.casefold() != ".mp4":
+                        raise ValueError("The upload source must be an MP4 file.")
+                    self._run_upload(source, upload)
+                except (OSError, ValueError) as exc:
+                    self.query_one("#events", Static).update(str(exc))
             event.input.value = ""
             return
         if event.input.id == "objective":
             analyze = self.analyze
-            if self.uploaded_video_path and event.value.strip() and analyze is not None:
-                self._run_analysis(
-                    self.uploaded_video_path, event.value.strip(), analyze
-                )
+            if event.value.strip() and analyze is not None:
+                try:
+                    references, objective = parse_file_references(event.value)
+                    videos = [path for path in references if path.suffix.casefold() == ".mp4"]
+                    if len(videos) > 1:
+                        raise ValueError("Reference at most one MP4 video per analysis.")
+                    video = videos[0] if videos else self.uploaded_video_path
+                    if video is None:
+                        raise ValueError("Upload a video or reference one with @path.")
+                    if not objective:
+                        raise ValueError("Enter an analysis objective after the video reference.")
+                    attachments = [path for path in references if path != video]
+                    if attachments:
+                        contents = []
+                        for path in attachments:
+                            if path.stat().st_size > 65_536:
+                                raise ValueError(f"Referenced file exceeds 64 KiB: {path}")
+                            try:
+                                contents.append(
+                                    f"--- {path} ---\n{path.read_text(encoding='utf-8')}"
+                                )
+                            except (OSError, UnicodeError):
+                                raise ValueError(
+                                    f"Referenced file is not readable UTF-8 text: {path}"
+                                ) from None
+                        objective += "\n\nReferenced files:\n" + "\n".join(contents)
+                    self._run_analysis(video, objective, analyze)
+                except (OSError, ValueError) as exc:
+                    self.query_one("#events", Static).update(str(exc))
             event.input.value = ""
             return
         follow_up = self.follow_up
         if self.selected_job_id and event.value.strip() and follow_up is not None:
-            self._run_follow_up(self.selected_job_id, event.value.strip(), follow_up)
+            try:
+                references, question = parse_file_references(event.value)
+                if references:
+                    question += "\n\nUser referenced local files: " + ", ".join(
+                        str(path) for path in references
+                    )
+                self._run_follow_up(self.selected_job_id, question, follow_up)
+            except (OSError, ValueError) as exc:
+                self.query_one("#events", Static).update(str(exc))
         event.input.value = ""
 
     @work(thread=True, exclusive=True)

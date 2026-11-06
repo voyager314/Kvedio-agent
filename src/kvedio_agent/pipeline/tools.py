@@ -1,9 +1,10 @@
-"""Bounded, job-scoped tools for evidence lookup and operational inspection."""
+"""Bounded tools for evidence lookup, job inspection, and local files."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from kvedio_agent.platform.storage import Store
@@ -20,11 +21,11 @@ class ToolSpec:
     name: str  # Allowlisted provider-visible function name.
     description: str  # User-data-only capability description.
     parameters: dict[str, Any]  # JSON Schema object; additional properties are forbidden.
-    handler: Callable[[dict[str, Any]], dict[str, Any]]  # Read-only handler scoped to one job.
+    handler: Callable[[dict[str, Any]], dict[str, Any]]  # Validated local operation.
 
 
 class JobToolRegistry:
-    """Expose read-only evidence and job state for exactly one persisted job."""
+    """Expose evidence, job state, and validated local file access."""
 
     def __init__(self, store: Store, job_id: str) -> None:
         self.store = store
@@ -95,7 +96,56 @@ class JobToolRegistry:
                 {"type": "object", "properties": {}, "additionalProperties": False},
                 lambda _: self.store.usage_summary(self.job_id),
             ),
+            "read_file": ToolSpec(
+                "read_file", "Read a UTF-8 text file from the local filesystem (up to 64 KiB).",
+                {
+                    "type": "object", "required": ["path"],
+                    "properties": {"path": {"type": "string", "minLength": 1}},
+                    "additionalProperties": False,
+                },
+                self._read_file,
+            ),
+            "write_file": ToolSpec(
+                "write_file",
+                "Write UTF-8 text to a local file (up to 64 KiB), creating parent directories.",
+                {
+                    "type": "object", "required": ["path", "content"],
+                    "properties": {
+                        "path": {"type": "string", "minLength": 1},
+                        "content": {"type": "string", "maxLength": 65536},
+                    },
+                    "additionalProperties": False,
+                },
+                self._write_file,
+            ),
         }
+
+    def _read_file(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        path = _file_path(arguments["path"])
+        try:
+            if not path.is_file() or path.stat().st_size > 65_536:
+                raise ToolCallError("file is missing or exceeds the 64 KiB limit")
+            return {"path": str(path), "content": path.read_text(encoding="utf-8")}
+        except (OSError, UnicodeError):
+            raise ToolCallError("file cannot be read as UTF-8 text") from None
+
+    def _write_file(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        content = arguments["content"]
+        if not isinstance(content, str):
+            raise ToolCallError("file content exceeds the 64 KiB limit")
+        try:
+            encoded_size = len(content.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise ToolCallError("file content must be valid UTF-8 text") from None
+        if encoded_size > 65_536:
+            raise ToolCallError("file content exceeds the 64 KiB limit")
+        path = _file_path(arguments["path"])
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        except OSError:
+            raise ToolCallError("file cannot be written") from None
+        return {"path": str(path), "bytes_written": encoded_size}
 
     def _search_evidence(self, arguments: dict[str, Any]) -> dict[str, Any]:
         query = arguments["query"]
@@ -143,6 +193,15 @@ def _range_schema() -> dict[str, Any]:
         },
         "additionalProperties": False,
     }
+
+
+def _file_path(value: Any) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ToolCallError("file path must be non-empty")
+    try:
+        return Path(value).expanduser().resolve()
+    except (OSError, ValueError):
+        raise ToolCallError("invalid file path") from None
 
 
 def _evidence_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

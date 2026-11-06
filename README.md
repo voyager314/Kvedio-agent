@@ -24,10 +24,11 @@ uv sync
 uv run kvedio-agent
 ```
 
-The first run creates `~/.kvedio_ai/settings.json` with no provider, model, or
-credential defaults. Add model entries and bind the roles required by the video
-and analysis. `api_key_env` contains an environment variable name; the key value
-must be set in the process environment. The application does not read `.env`.
+The first run creates a complete `~/.kvedio_ai/settings.json` template with chat,
+ASR, and vision model entries, active role bindings, all supported model tuning
+and pricing fields, and every runtime parameter. Replace each
+`REPLACE_WITH_*` value with details for an OpenAI-compatible provider, including
+the provider credential in `api_key`. Keep this user-owned file private.
 
 ```json
 {
@@ -35,20 +36,41 @@ must be set in the process environment. The application does not read `.env`.
     "my-chat": {
       "model": "provider/model-id",
       "api_base": "https://provider.example/v1",
-      "api_key_env": "MY_CHAT_TOKEN",
-      "roles": ["chat"]
+      "api_key": "REPLACE_WITH_CHAT_API_KEY",
+      "roles": ["chat"],
+      "note": "Chat and tool-calling model",
+      "timeout_seconds": 120,
+      "max_attempts": 3,
+      "requests_per_minute": null,
+      "input_cost_per_million": null,
+      "output_cost_per_million": null,
+      "audio_cost_per_minute": null
     },
     "my-asr": {
       "model": "provider/asr-model-id",
       "api_base": "https://provider.example/v1",
-      "api_key_env": "MY_ASR_TOKEN",
-      "roles": ["asr"]
+      "api_key": "REPLACE_WITH_ASR_API_KEY",
+      "roles": ["asr"],
+      "note": "Audio transcription model",
+      "timeout_seconds": 300,
+      "max_attempts": 3,
+      "requests_per_minute": null,
+      "input_cost_per_million": null,
+      "output_cost_per_million": null,
+      "audio_cost_per_minute": null
     },
     "my-vision": {
       "model": "provider/vision-model-id",
       "api_base": "https://provider.example/v1",
-      "api_key_env": "MY_VISION_TOKEN",
-      "roles": ["vision"]
+      "api_key": "REPLACE_WITH_VISION_API_KEY",
+      "roles": ["vision"],
+      "note": "Image input model",
+      "timeout_seconds": 120,
+      "max_attempts": 3,
+      "requests_per_minute": null,
+      "input_cost_per_million": null,
+      "output_cost_per_million": null,
+      "audio_cost_per_minute": null
     }
   },
   "active": {
@@ -63,7 +85,9 @@ must be set in the process environment. The application does not read `.env`.
     "segment_overlap_seconds": 2,
     "max_media_workers": 2,
     "max_asr_workers": 4,
-    "max_vision_workers": 2
+    "max_vision_workers": 2,
+    "max_global_workers": 6,
+    "max_job_cost_usd": null
   }
 }
 ```
