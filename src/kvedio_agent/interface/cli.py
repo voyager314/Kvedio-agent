@@ -467,14 +467,26 @@ def analyze_command(
 def resume_command(job_id: str) -> None:
     """Resume a local video analysis job from its persisted media manifest."""
 
+    settings = _load_settings()
+    new_job_id, session_id = _resume_job(job_id, settings)
+    console.print(f"Resumed job {new_job_id}; session {session_id}")
+
+
+def _resume_job(job_id: str, settings: Settings) -> tuple[str, str]:
+    """Resume one persisted job using the same callback for CLI and workbench.
+
+    job_id: Full job ID or an unambiguous prefix; it is not mutated.
+    settings: Validated user settings used to construct the existing analysis run.
+    Returns the resolved job ID and conversation ID from the resumed run.
+    Raises BadParameter when the saved video is missing or the job is ambiguous.
+    """
+
     job = _job(job_id)
     source = Path(job["source_path"])
     if not source.is_file():
         raise typer.BadParameter("The referenced source video is missing.")
-    settings = _load_settings()
     store.set_job_status(job["id"], "interrupted", "resume")
-    new_job_id, session_id = _run_analysis(source, job["objective"], settings, job["id"])
-    console.print(f"Resumed job {new_job_id}; session {session_id}")
+    return _run_analysis(source, job["objective"], settings, job["id"])
 
 
 @app.command("show")
@@ -580,7 +592,23 @@ def workbench_command() -> None:
         job_id, _ = _run_analysis(video, objective, settings)
         return job_id
 
-    run_workbench(store, follow_up, upload, analyze)
+    def resume(job_id: str) -> str:
+        resumed_job_id, _ = _resume_job(job_id, settings)
+        return resumed_job_id
+
+    def locate(job_id: str, start_ms: int, end_ms: int) -> str:
+        result = AnalysisService(
+            store, EvidenceIndex(store), _text(settings, job_id)
+        ).locate(job_id, start_ms, end_ms)
+        lines = [
+            f"[{item.start_ms}..{item.end_ms} ms] {item.modality}: {item.content}"
+            for item in result.matches
+        ]
+        if result.uncertainty:
+            lines.append("Uncertainty: " + result.uncertainty)
+        return "\n".join(lines) or "No evidence"
+
+    run_workbench(store, follow_up, upload, analyze, settings, resume, locate)
 
 
 @app.callback(invoke_without_command=True)

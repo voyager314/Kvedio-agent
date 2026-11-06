@@ -101,11 +101,21 @@ and prices must be checked with the provider before use. See
 - `kvedio-agent cancel JOB_ID` marks work cancelled; `delete JOB_ID` removes
   generated job data and leaves the source video untouched.
 
-The workbench is a Textual application. It restores the durable job list,
-stage milestones, timestamped evidence, and follow-up input from the local
-SQLite workspace. Follow-up answers run outside the UI thread and are persisted
-with their evidence links. Analysis instructions are structured Jinja2
-templates shipped under the package `prompts/` directory.
+The workbench is a Textual application with one prompt for commands, new
+analysis requests, and follow-up questions. Type `/` for command suggestions
+and `@` for local file path suggestions; quote paths containing spaces. Text
+references are limited to 64 KiB of UTF-8, and one MP4 reference may select the
+analysis source. Binary references are reported as unsupported content.
+
+The prompt supports `/help`, `/exit` (`/quit`), `/model` (`/models`),
+`/jobs`, `/uploads`, `/upload`, `/analyze`, `/ask`, `/resume`, `/show`,
+`/locate`, `/cancel`, `/delete`, `/config`, and `/reference`. `/model` displays
+the configured video and ASR models; model selection remains in the user-owned
+settings file. The workbench restores durable job state, stage milestones,
+timestamped evidence, and follow-up history from the local SQLite workspace.
+Follow-up answers run outside the UI thread and are persisted with their
+evidence links. Analysis instructions are structured Jinja2 templates shipped
+under the package `prompts/` directory.
 
 Jobs, stages, segment artifacts, evidence, scratchpad checkpoints, conversations,
 messages, and events are stored in SQLite below the workspace. Default artifact
