@@ -7,6 +7,7 @@ import json
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import cast
 
@@ -124,42 +125,33 @@ class MediaProcessor:
         self.store.set_job_status(job_id, "running", "preprocess")
         segment_ms = self.config.max_segment_duration_seconds * 1000
         overlap_ms = self.config.segment_overlap_seconds * 1000
-        specs: list[tuple[str, int, int, Path, list[Path]]] = []
+        specs: list[tuple[str, int, int, Path, Path]] = []
         start = 0
         while start < media.duration_ms:
             end = min(start + segment_ms, media.duration_ms)
             segment_id = self.store.add_segment(job_id, "media", start, end)
-            audio_path = output_dir / f"{start:012d}-{end:012d}.wav"
-            frame_paths = [
-                output_dir / f"{start:012d}-{end:012d}-{index}.jpg"
-                for index in range(3)
-            ]
-            specs.append((segment_id, start, end, audio_path, frame_paths))
+            specs.append((
+                segment_id, start, end,
+                output_dir / f"{start:012d}-{end:012d}.wav",
+                output_dir / f"{start:012d}-{end:012d}.mp4",
+            ))
             if end == media.duration_ms:
                 break
             start = end - overlap_ms
 
-        def generate(spec: tuple[str, int, int, Path, list[Path]]) -> list[int]:
-            _, start_ms, end_ms, audio_path, frame_paths = spec
+        def generate(spec: tuple[str, int, int, Path, Path]) -> None:
+            _, start_ms, end_ms, audio_path, clip_path = spec
             if not audio_path.exists() and media.audio_streams:
                 self._write_audio(source, start_ms, end_ms, audio_path)
-            if media.video_streams:
-                return self._write_keyframes(source, start_ms, end_ms, frame_paths)
-            return []
+            if not clip_path.exists() and media.video_streams:
+                self._write_clip(source, start_ms, end_ms, clip_path)
 
         with ThreadPoolExecutor(max_workers=self.config.max_media_workers) as pool:
-            frame_times_by_id = {
-                spec[0]: frame_times
-                for spec, frame_times in zip(specs, pool.map(generate, specs))
-            }
+            list(pool.map(generate, specs))
 
-        for segment_id, start, end, audio_path, frame_paths in specs:
-            frame_times = frame_times_by_id[segment_id]
+        for segment_id, start, end, audio_path, clip_path in specs:
             artifact_id = None
-            generated = [("audio", audio_path)] + [
-                ("keyframe", path) for path in frame_paths if path.exists()
-            ]
-            for kind, artifact_path in generated:
+            for kind, artifact_path in (("audio", audio_path), ("clip", clip_path)):
                 if artifact_path.exists():
                     artifact_id = self.store.add_artifact(
                         job_id, kind, artifact_path, _file_digest(artifact_path),
@@ -172,8 +164,7 @@ class MediaProcessor:
                     "start_ms": start,
                     "end_ms": end,
                     "audio": str(audio_path) if audio_path.exists() else None,
-                    "keyframes": [str(path) for path in frame_paths if path.exists()],
-                    "frame_times_ms": frame_times,
+                    "clip": str(clip_path) if clip_path.exists() else None,
                 }
             )
             temporary_manifest = manifest_path.with_suffix(".tmp")
@@ -216,52 +207,60 @@ class MediaProcessor:
                 wav.setframerate(16_000)
                 wav.writeframes(b"".join(chunks))
 
-    @staticmethod
-    def _frame_times(start_ms: int, end_ms: int, count: int) -> list[int]:
-        return [start_ms + ((end_ms - start_ms) * (index + 1)) // (count + 1)
-                for index in range(count)]
+    def _write_clip(self, source: Path, start_ms: int, end_ms: int, target: Path) -> int:
+        """Re-encode one source window as an mp4 clip and return the frames it holds.
 
-    def _write_keyframes(
-        self, source: Path, start_ms: int, end_ms: int, targets: list[Path]
-    ) -> list[int]:
+        The window is resampled to the configured perception frame rate and scaled
+        under the configured width, so the size of a perception request follows the
+        settings rather than the source resolution. Returns zero and writes nothing
+        when the window decodes to no frames.
+        """
+
+        interval_ms = 1000 / self.config.clip_frames_per_second
+        sampled: list[av.VideoFrame] = []
         with av.open(str(source), mode="r") as container:
             stream = container.streams.video[0]
             if stream.time_base is None:
                 raise ValueError("video stream has no time base")
-            sample_times = self._frame_times(start_ms, end_ms, len(targets))
-            seek_pts = int(start_ms * av.time_base / 1000 / stream.time_base)
-            container.seek(seek_pts, stream=stream, backward=True, any_frame=False)
-            written: list[int] = []
-            next_sample = 0
+            container.seek(
+                int(start_ms * av.time_base / 1000 / stream.time_base),
+                stream=stream, backward=True, any_frame=False,
+            )
+            next_sample_ms = float(start_ms)
             for frame in container.decode(stream):
                 if frame.pts is None:
                     continue
                 timestamp_ms = int(frame.pts * (frame.time_base or stream.time_base) * 1000)
                 if timestamp_ms >= end_ms:
                     break
-                if next_sample >= len(sample_times):
-                    break
-                remaining_frames = len(targets) - next_sample
-                remaining_samples = len(sample_times) - next_sample
-                if (
-                    timestamp_ms < sample_times[next_sample]
-                    and remaining_frames > remaining_samples
-                ):
+                if timestamp_ms < start_ms or timestamp_ms < next_sample_ms:
                     continue
-                rgb = frame.reformat(format="yuvj420p")
-                with av.open(str(targets[next_sample]), mode="w", format="image2") as output:
-                    image_stream = cast(av.video.stream.VideoStream, output.add_stream("mjpeg"))
-                    image_stream.width = rgb.width
-                    image_stream.height = rgb.height
-                    image_stream.pix_fmt = "yuvj420p"
-                    for packet in image_stream.encode(rgb):
-                        output.mux(packet)
-                    for packet in image_stream.encode(None):
-                        output.mux(packet)
-                written.append(timestamp_ms)
-                next_sample += 1
-            return written
-        return []
+                sampled.append(frame)
+                next_sample_ms += interval_ms
+        if not sampled:
+            return 0
+        width, height = _even_scale(
+            sampled[0].width, sampled[0].height, self.config.clip_max_width
+        )
+        with av.open(str(target), mode="w") as output:
+            clip_stream = cast(
+                av.video.stream.VideoStream,
+                output.add_stream("libx264", rate=Fraction(self.config.clip_frames_per_second)),
+            )
+            clip_stream.width = width
+            clip_stream.height = height
+            clip_stream.pix_fmt = "yuv420p"
+            for index, frame in enumerate(sampled):
+                scaled = frame.reformat(width=width, height=height, format="yuv420p")
+                scaled.pts = index
+                scaled.time_base = Fraction(1, 1) / Fraction(
+                    self.config.clip_frames_per_second
+                )
+                for packet in clip_stream.encode(scaled):
+                    output.mux(packet)
+            for packet in clip_stream.encode(None):
+                output.mux(packet)
+        return len(sampled)
 
 
 def validate_resume(path: Path, expected: SourceFingerprint) -> bool:
@@ -271,6 +270,19 @@ def validate_resume(path: Path, expected: SourceFingerprint) -> bool:
         return fingerprint(path) == expected
     except OSError:
         return False
+
+
+def _even_scale(width: int, height: int, max_width: int) -> tuple[int, int]:
+    """Fit a frame under a width ceiling, keeping aspect and even dimensions.
+
+    Both results are even because the H.264 encoders reject odd dimensions in
+    4:2:0, and both are at least two pixels.
+    """
+
+    if width <= max_width:
+        return max(2, width - width % 2), max(2, height - height % 2)
+    scaled_height = max(2, round(height * max_width / width))
+    return max(2, max_width - max_width % 2), scaled_height - scaled_height % 2
 
 
 def _file_digest(path: Path) -> str:

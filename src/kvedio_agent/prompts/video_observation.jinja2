@@ -1,0 +1,15 @@
+Observe the supplied clip and report what happens in it.
+
+The clip covers {{ start_ms }}..{{ end_ms }} ms of the recording. Report every
+timestamp in that range, measured from the start of the recording rather than
+from the start of the clip.
+
+Rules:
+- Report only what the clip shows or says. Do not infer events it does not cover.
+- Report at most {{ max_events }} events, keeping the most consequential ones.
+- Separate readable on-screen text from visual interpretation in the wording.
+- Give each event the narrowest range that contains it.
+- State uncertainty in the event text when a detail cannot be made out.
+
+Return one JSON object with an `events` array. Each event has:
+`start_ms`, `end_ms`, `text`, and `entities` (array of names read or recognized).

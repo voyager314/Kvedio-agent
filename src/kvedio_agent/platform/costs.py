@@ -123,9 +123,16 @@ class ProviderGate:
             + output_tokens * self.model.output_cost_per_million
         ) / 1_000_000
 
-    def estimate_vision(
+    def estimate_video(
         self, prompt: str, frame_count: int, output_tokens: int = 1024
     ) -> float | None:
+        """Estimate one clip observation from its prompt and the frames the clip holds.
+
+        frame_count: frames the provider is billed for; zero estimates a text-only call.
+        Returns None when the connection carries no token prices, which leaves the call
+        unpriced rather than guessed.
+        """
+
         if frame_count < 0:
             raise ValueError("frame count cannot be negative")
         if self.model.input_cost_per_million is None or self.model.output_cost_per_million is None:

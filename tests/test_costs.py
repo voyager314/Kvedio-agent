@@ -99,7 +99,7 @@ def test_text_estimate_falls_back_for_cjk_and_vision_scales_by_frames(
     monkeypatch.setattr("litellm.token_counter", fail)
     gate = ProviderGate(store, model, None)
     assert gate.estimate_chat("中文", output_tokens=0) == pytest.approx(0.000003)
-    assert gate.estimate_vision("prompt", 2) > gate.estimate_vision("prompt", 1)
+    assert gate.estimate_video("prompt", 2) > gate.estimate_video("prompt", 1)
 
 
 def test_usage_summary_separates_estimated_only_and_reservations(tmp_path: Path) -> None:

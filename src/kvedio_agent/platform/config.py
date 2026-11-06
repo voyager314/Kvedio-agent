@@ -16,6 +16,11 @@ class Config(BaseModel):
     retention_days: int = Field(default=30, gt=0)  # Positive artifact retention period in days.
     max_segment_duration_seconds: int = Field(default=120, gt=0)  # Window length in seconds.
     segment_overlap_seconds: int = Field(default=2, ge=0)  # Overlap in seconds; zero disables it.
+    # Frames per second kept when a window is re-encoded as a clip; what a video model
+    # is billed for is frames, so this sets the price of one perception call.
+    clip_frames_per_second: float = Field(default=1.0, gt=0)
+    clip_max_width: int = Field(default=640, gt=0)  # Clip width ceiling in pixels; height follows.
+    max_clip_events: int = Field(default=12, gt=0)  # Observations kept from one clip, at most.
     max_media_workers: int = Field(default=2, gt=0)  # Positive preprocessing worker limit.
     max_asr_workers: int = Field(default=4, gt=0)  # Positive ASR stage worker limit.
     max_video_workers: int = Field(default=2, gt=0)  # Positive video stage worker limit.

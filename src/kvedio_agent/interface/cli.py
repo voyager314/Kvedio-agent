@@ -23,7 +23,7 @@ from kvedio_agent.platform.ingestion import LocalChunkIngestor, UploadProgress
 from kvedio_agent.platform.providers import (
     LiteLLMChat,
     OpenAICompatibleASR,
-    OpenAICompatibleVision,
+    OpenAICompatibleVideo,
 )
 from kvedio_agent.platform.settings import Settings, ensure_settings, settings_path
 from kvedio_agent.platform.storage import Store
@@ -175,38 +175,34 @@ def _evidence_context(
         video_units = [
             WorkUnit(segment["id"], segment["start_ms"], segment["end_ms"], segment)
             for segment in manifest["segments"]
-            if segment.get("keyframes")
+            if segment.get("clip")
             and not store.evidence_exists(
                 job_id, "visual", segment["start_ms"], segment["end_ms"]
             )
         ]
 
-        def inspect(unit: WorkUnit) -> Any:
-            provider = OpenAICompatibleVision(
+        def observe(unit: WorkUnit) -> Any:
+            provider = OpenAICompatibleVideo(
                 video_entry,
                 video_entry.timeout_seconds,
                 ProviderGate(store, video_entry, config.max_job_cost_usd),
                 job_id,
             )
-            return provider.describe(
-                list(zip(
-                    [Path(path) for path in unit.payload["keyframes"]],
-                    unit.payload["frame_times_ms"],
-                )),
-                unit.start_ms,
-                unit.end_ms,
+            return provider.observe(
+                Path(unit.payload["clip"]), unit.start_ms, unit.end_ms, config.max_clip_events
             )
 
-        def save_observation(unit: WorkUnit, observation: Any) -> None:
-            store.add_evidence(
-                job_id, "visual", unit.start_ms, unit.end_ms,
-                {"provider_model": video_entry.model}, observation.summary,
-                confidence=observation.confidence,
-            )
+        def save_observation(unit: WorkUnit, events: Any) -> None:
+            for event in events:
+                store.add_evidence(
+                    job_id, "visual", event.start_ms, event.end_ms,
+                    {"provider_model": video_entry.model, "entities": list(event.entities)},
+                    event.text,
+                )
             progress.advance(task_id)
 
         scheduler.run(
-            job_id, "inspect_visuals", video_units, inspect, save_observation,
+            job_id, "observe_clips", video_units, observe, save_observation,
             max_workers=min(config.max_video_workers, config.max_global_workers),
             max_attempts=video_entry.max_attempts,
         )

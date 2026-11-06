@@ -40,16 +40,13 @@ class TranscriptSegment:
 
 
 @dataclass(frozen=True)
-class VisualObservation:
-    """Normalized observation tied to a source-relative visual interval."""
+class VideoEvent:
+    """One event observed inside a clip, timed against the source recording."""
 
-    start_ms: int  # Source-relative interval start in milliseconds; non-negative.
-    end_ms: int  # Source-relative interval end in milliseconds; greater than start_ms.
-    summary: str  # Provider description of the supplied visual evidence.
-    ocr_text: str | None = None  # Extracted on-screen text, or None when not supplied.
-    confidence: float | None = None  # Provider confidence in [0, 1], or None when absent.
-    frame_times_ms: tuple[int, ...] = ()  # Source-relative frame times in milliseconds.
-    frame_paths: tuple[str, ...] = ()  # Local generated frame paths; empty when unavailable.
+    start_ms: int  # Source-relative start in milliseconds; inside the observed window.
+    end_ms: int  # Source-relative end in milliseconds; greater than start_ms.
+    text: str  # What the provider reports happening; non-empty when emitted.
+    entities: tuple[str, ...] = ()  # Names read or recognized on screen; empty when none.
 
 
 @dataclass(frozen=True)
@@ -174,12 +171,12 @@ class ASRProvider(Protocol):
     def transcribe(self, audio_path: Path, start_ms: int) -> list[TranscriptSegment]: ...
 
 
-class VisionProvider(Protocol):
-    """Describe bounded keyframe evidence."""
+class VideoProvider(Protocol):
+    """Observe one bounded clip and report events timed against the recording."""
 
-    def describe(
-        self, frame_paths: list[Path], start_ms: int, end_ms: int
-    ) -> VisualObservation: ...
+    def observe(
+        self, clip_path: Path, start_ms: int, end_ms: int, max_events: int
+    ) -> list[VideoEvent]: ...
 
 
 class OpenAICompatibleASR:
@@ -252,8 +249,13 @@ class OpenAICompatibleASR:
             )
 
 
-class OpenAICompatibleVision:
-    """Call a vision-capable chat endpoint with local image references."""
+class OpenAICompatibleVideo:
+    """Send one clip to a chat endpoint that accepts video parts and return bounded events.
+
+    The clip travels inline as a data URL, which is what OpenAI-compatible video
+    endpoints accept. A provider that requires its own upload API needs its own
+    adapter rather than a second transport here.
+    """
 
     def __init__(
         self,
@@ -270,30 +272,36 @@ class OpenAICompatibleVision:
         self.gate = gate
         self.job_id = job_id
 
-    def describe(
-        self, frames: list[tuple[Path, int]], start_ms: int, end_ms: int
-    ) -> VisualObservation:
-        """Send a bounded image set and normalize a textual visual observation."""
+    def observe(
+        self, clip_path: Path, start_ms: int, end_ms: int, max_events: int
+    ) -> list[VideoEvent]:
+        """Observe one clip and return at most max_events events inside its window.
+
+        clip_path: local clip covering exactly the requested window.
+        start_ms, end_ms: source-relative bounds the returned events are clamped to,
+        so a provider that reports clip-relative times cannot shift the record.
+        max_events: upper bound on returned events, which is what keeps the evidence
+        this stage produces proportional to the recording rather than to the model's
+        verbosity.
+        Returns events in source-time order; an empty list means nothing was reported.
+        """
 
         prompt_text = PromptRenderer().render(
-            "visual_observation",
-            frame_times_ms=", ".join(str(timestamp) for _, timestamp in frames),
+            "video_observation",
+            start_ms=start_ms, end_ms=end_ms, max_events=max_events,
         )
-        content: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
-        for frame, timestamp_ms in frames:
-            mime = mimetypes.guess_type(frame.name)[0] or "image/jpeg"
-            encoded = base64.b64encode(frame.read_bytes()).decode("ascii")
-            content.append({"type": "text", "text": f"Source timestamp: {timestamp_ms} ms"})
-            content.append(
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
-            )
+        encoded = base64.b64encode(clip_path.read_bytes()).decode("ascii")
+        mime = mimetypes.guess_type(clip_path.name)[0] or "video/mp4"
         payload = {
             "model": self.model.model,
-            "messages": [{"role": "user", "content": content}],
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": prompt_text},
+                {"type": "video_url", "video_url": {"url": f"data:{mime};base64,{encoded}"}},
+            ]}],
             "temperature": 0,
             "max_tokens": 2048,
         }
-        reservation = self._reserve(frames, start_ms)
+        reservation = self._reserve(clip_path, prompt_text, start_ms)
         try:
             response = httpx.post(
                 self.base_url + "/chat/completions",
@@ -306,49 +314,36 @@ class OpenAICompatibleVision:
             if response.status_code >= 400:
                 raise ProviderError("provider_request_rejected", retryable=False)
             data = response.json()
-            summary = str(data["choices"][0]["message"]["content"])
-            self._settle(reservation, frames, data)
-            return VisualObservation(
-                start_ms, end_ms, summary,
-                frame_times_ms=tuple(timestamp for _, timestamp in frames),
-                frame_paths=tuple(str(path) for path, _ in frames),
+            events = _parse_events(
+                str(data["choices"][0]["message"]["content"]), start_ms, end_ms, max_events
             )
+            self._settle(reservation, clip_path, data)
+            return events
         except ProviderError as exc:
-            self._settle(reservation, frames, failed=True, retryable=exc.retryable)
+            self._settle(reservation, clip_path, failed=True, retryable=exc.retryable)
             raise
         except httpx.TimeoutException:
-            self._settle(reservation, frames, failed=True)
+            self._settle(reservation, clip_path, failed=True)
             raise ProviderError("provider_timeout", retryable=True) from None
         except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError):
-            self._settle(reservation, frames, failed=True)
+            self._settle(reservation, clip_path, failed=True)
             raise ProviderError("provider_invalid_response", retryable=False) from None
 
     def _reserve(
-        self, frames: list[tuple[Path, int]], start_ms: int
+        self, clip_path: Path, prompt: str, start_ms: int
     ) -> UsageReservation | None:
         if self.gate is None or self.job_id is None:
             return None
         return self.gate.reserve(
             self.job_id,
-            "vision",
-            call_key(
-                "vision",
-                f"{start_ms}:" + ":".join(_file_digest(p) for p, _ in frames),
-                self.model,
-            ),
-            self.gate.estimate_vision(
-                PromptRenderer().render(
-                    "visual_observation",
-                    frame_times_ms=", ".join(str(timestamp) for _, timestamp in frames),
-                ),
-                len(frames),
-                output_tokens=2048,
-            ),
+            "video",
+            call_key("video", f"{start_ms}:{_file_digest(clip_path)}", self.model),
+            self.gate.estimate_video(prompt, _clip_frames(clip_path), output_tokens=2048),
         )
 
     def _settle(
         self, reservation: UsageReservation | None,
-        frames: list[tuple[Path, int]], response: dict[str, Any] | None = None,
+        clip_path: Path, response: dict[str, Any] | None = None,
         failed: bool = False, retryable: bool = False,
     ) -> None:
         if reservation and self.gate:
@@ -369,6 +364,61 @@ class OpenAICompatibleVision:
                 reservation, actual_cost, input_tokens, output_tokens,
                 failed=failed, retryable=retryable,
             )
+
+
+def _parse_events(
+    response: str, start_ms: int, end_ms: int, max_events: int
+) -> list[VideoEvent]:
+    """Normalize a clip observation into bounded events inside the observed window.
+
+    response: provider text, optionally fenced, holding an object with an `events` array.
+    start_ms, end_ms: window the returned events are clamped to; an event reported
+    outside it is moved inside rather than dropped, because a provider reporting
+    clip-relative times would otherwise lose the whole clip.
+    max_events: how many events survive; the rest are discarded.
+    Returns events ordered by source time, each carrying non-empty text.
+    """
+
+    text = response.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        raise ValueError("response is not JSON") from None
+    if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
+        raise ValueError("response has no events array")
+    events: list[VideoEvent] = []
+    for item in payload["events"][:max_events]:
+        if not isinstance(item, dict):
+            raise ValueError("event is not an object")
+        description = str(item.get("text", "")).strip()
+        if not description:
+            continue
+        event_start = min(max(int(item["start_ms"]), start_ms), end_ms - 1)
+        event_end = min(max(int(item["end_ms"]), event_start + 1), end_ms)
+        events.append(
+            VideoEvent(
+                event_start, event_end, description,
+                tuple(str(name) for name in item.get("entities", [])),
+            )
+        )
+    return sorted(events, key=lambda event: (event.start_ms, event.end_ms))
+
+
+def _clip_frames(path: Path) -> int:
+    """Count the frames one clip holds, returning zero when it cannot be read."""
+
+    try:
+        import av
+
+        with av.open(str(path), mode="r") as container:
+            stream = container.streams.video[0]
+            if stream.frames:
+                return int(stream.frames)
+            return sum(1 for _ in container.decode(stream))
+    except Exception:
+        return 0
 
 
 def _parse_transcript(payload: dict[str, Any], offset_ms: int) -> list[TranscriptSegment]:

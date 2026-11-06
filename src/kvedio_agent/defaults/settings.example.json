@@ -41,6 +41,12 @@
     // Media segment window and overlap, in seconds.
     "max_segment_duration_seconds": 120,
     "segment_overlap_seconds": 2,
+    // Frames kept per second of clip, and the clip width ceiling in pixels. A video
+    // model is billed for frames, so these set the price of observing one window.
+    "clip_frames_per_second": 1.0,
+    "clip_max_width": 640,
+    // Observations kept from one clip, at most.
+    "max_clip_events": 12,
     // Maximum concurrent preprocessing, transcription, and video work units.
     "max_media_workers": 2,
     "max_asr_workers": 4,

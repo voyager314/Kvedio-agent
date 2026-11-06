@@ -11,7 +11,7 @@ from kvedio_agent.platform.providers import (
     Completion,
     LiteLLMChat,
     OpenAICompatibleASR,
-    OpenAICompatibleVision,
+    OpenAICompatibleVideo,
     ProviderError,
     _parse_transcript,
 )
@@ -137,62 +137,104 @@ def test_chat_adapter_accepts_tool_call_without_text_content(
     assert captured["tool_choice"] == "auto"
 
 
-def test_visual_observation_preserves_frame_source_timestamps(
+def _video_model() -> ModelEntry:
+    return ModelEntry(
+        model="video/model", base_url="https://provider.example/v1",
+        api_key="VIDEO_TOKEN",
+    )
+
+
+def _events_response(events: list[dict[str, object]], usage: bool = False) -> object:
+    def response(*args: object, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+        body: dict[str, object] = {
+            "choices": [{"message": {"content": json.dumps({"events": events})}}]
+        }
+        if usage:
+            body["usage"] = {"prompt_tokens": 20, "completion_tokens": 5}
+        return httpx.Response(200, request=request, json=body)
+
+    return response
+
+
+def test_clip_observation_sends_the_clip_and_orders_events(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("VISION_TOKEN", "vision-secret")
-    frame = tmp_path / "frame.jpg"
-    frame.write_bytes(b"jpeg")
-    model = ModelEntry(
-        model="vision/model", base_url="https://provider.example/v1",
-        api_key="VISION_TOKEN",
-    )
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"mp4")
+    captured: dict[str, object] = {}
+
+    def response(*args: object, **kwargs: object) -> httpx.Response:
+        captured.update(kwargs["json"])  # type: ignore[arg-type]
+        return _events_response([
+            {"start_ms": 1400, "end_ms": 1500, "text": "second", "entities": ["Ada"]},
+            {"start_ms": 1000, "end_ms": 1200, "text": "first"},
+        ])(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "post", response)
+    events = OpenAICompatibleVideo(_video_model()).observe(clip, 1000, 1500, 12)
+    parts = captured["messages"][0]["content"]  # type: ignore[index]
+    assert parts[1]["type"] == "video_url"
+    assert parts[1]["video_url"]["url"].startswith("data:video/mp4;base64,")
+    assert [event.text for event in events] == ["first", "second"]
+    assert events[1].entities == ("Ada",)
+
+
+def test_clip_observation_bounds_event_count_and_time_range(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"mp4")
+    monkeypatch.setattr(httpx, "post", _events_response([
+        {"start_ms": 0, "end_ms": 50, "text": "reported against the clip, not the source"},
+        {"start_ms": 1100, "end_ms": 9_000, "text": "runs past the window"},
+        {"start_ms": 1200, "end_ms": 1300, "text": "dropped by the cap"},
+    ]))
+    events = OpenAICompatibleVideo(_video_model()).observe(clip, 1000, 1500, 2)
+    assert len(events) == 2
+    assert all(1000 <= event.start_ms < event.end_ms <= 1500 for event in events)
+
+
+def test_clip_observation_rejects_a_response_without_events(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"mp4")
 
     def response(*args: object, **kwargs: object) -> httpx.Response:
         request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
         return httpx.Response(
-            200,
-            request=request,
-            json={"choices": [{"message": {"content": "A slide"}}]},
+            200, request=request, json={"choices": [{"message": {"content": "A slide"}}]}
         )
 
     monkeypatch.setattr(httpx, "post", response)
-    result = OpenAICompatibleVision(model).describe([(frame, 1250)], 1000, 1500)
-    assert result.frame_times_ms == (1250,)
-    assert result.start_ms == 1000
+    with pytest.raises(ProviderError, match="provider_invalid_response"):
+        OpenAICompatibleVideo(_video_model()).observe(clip, 1000, 1500, 12)
 
 
-def test_vision_usage_is_persisted_as_actual_cost(
+def test_video_usage_is_persisted_as_actual_cost(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("VISION_TOKEN", "vision-secret")
-    frame = tmp_path / "frame.jpg"
-    frame.write_bytes(b"image")
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"mp4")
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     store = Store(tmp_path / "workspace")
     source_id = store.register_source(source, 6, source.stat().st_mtime_ns, "digest")
     job_id = store.create_job(source_id, "objective", {})
     model = ModelEntry(
-        model="vision/model", base_url="https://provider.example/v1",
-        api_key="VISION_TOKEN",
+        model="video/model", base_url="https://provider.example/v1",
+        api_key="VIDEO_TOKEN",
         input_cost_per_million=1, output_cost_per_million=2,
     )
 
-    def response(*args: object, **kwargs: object) -> httpx.Response:
-        assert kwargs["json"]["max_tokens"] == 2048  # type: ignore[index]
-        request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
-        return httpx.Response(
-            200, request=request,
-            json={"choices": [{"message": {"content": "A slide"}}],
-                  "usage": {"prompt_tokens": 20, "completion_tokens": 5}},
-        )
-
-    monkeypatch.setattr(httpx, "post", response)
-    provider = OpenAICompatibleVision(
+    monkeypatch.setattr(httpx, "post", _events_response(
+        [{"start_ms": 1000, "end_ms": 1200, "text": "a slide"}], usage=True
+    ))
+    provider = OpenAICompatibleVideo(
         model, gate=ProviderGate(store, model, None), job_id=job_id
     )
-    provider.describe([(frame, 1250)], 1000, 1500)
+    provider.observe(clip, 1000, 1500, 12)
     summary = store.usage_summary(job_id)
     assert summary["actual_cost_usd"] == pytest.approx(0.00003)
     assert summary["estimated_only_calls"] == 0
