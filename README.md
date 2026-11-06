@@ -24,59 +24,39 @@ uv sync
 uv run kvedio-agent
 ```
 
-The first run creates a complete `~/.kvedio_ai/settings.json` template with chat,
-ASR, and vision model entries, active role bindings, all supported model tuning
-and pricing fields, and every runtime parameter. Replace each
-`REPLACE_WITH_*` value with details for an OpenAI-compatible provider, including
-the provider credential in `api_key`. Keep this user-owned file private.
+The first run creates a complete `~/.kvedio_ai/settings.json` template with one
+connection per capability, all supported tuning and pricing fields, and every
+runtime parameter. Replace each `REPLACE_WITH_*` value with details for an
+OpenAI-compatible provider, including the provider credential in `api_key`. Keep
+this user-owned file private.
+
+A capability names its own connection. `video` reads the recording and answers
+questions about it; `asr` transcribes audio and may be deleted to leave speech
+untranscribed. One provider may back both by repeating its details under each.
 
 ```json
 {
-  "models": {
-    "my-chat": {
-      "model": "provider/model-id",
-      "api_base": "https://provider.example/v1",
-      "api_key": "REPLACE_WITH_CHAT_API_KEY",
-      "roles": ["chat"],
-      "note": "Chat and tool-calling model",
-      "timeout_seconds": 120,
-      "max_attempts": 3,
-      "requests_per_minute": null,
-      "input_cost_per_million": null,
-      "output_cost_per_million": null,
-      "audio_cost_per_minute": null
-    },
-    "my-asr": {
-      "model": "provider/asr-model-id",
-      "api_base": "https://provider.example/v1",
-      "api_key": "REPLACE_WITH_ASR_API_KEY",
-      "roles": ["asr"],
-      "note": "Audio transcription model",
-      "timeout_seconds": 300,
-      "max_attempts": 3,
-      "requests_per_minute": null,
-      "input_cost_per_million": null,
-      "output_cost_per_million": null,
-      "audio_cost_per_minute": null
-    },
-    "my-vision": {
-      "model": "provider/vision-model-id",
-      "api_base": "https://provider.example/v1",
-      "api_key": "REPLACE_WITH_VISION_API_KEY",
-      "roles": ["vision"],
-      "note": "Image input model",
-      "timeout_seconds": 120,
-      "max_attempts": 3,
-      "requests_per_minute": null,
-      "input_cost_per_million": null,
-      "output_cost_per_million": null,
-      "audio_cost_per_minute": null
-    }
+  "video": {
+    "model": "provider/video-model-id",
+    "base_url": "https://provider.example/v1",
+    "api_key": "REPLACE_WITH_VIDEO_API_KEY",
+    "timeout_seconds": 120,
+    "max_attempts": 3,
+    "requests_per_minute": null,
+    "input_cost_per_million": null,
+    "output_cost_per_million": null,
+    "audio_cost_per_minute": null
   },
-  "active": {
-    "chat": "my-chat",
-    "asr": "my-asr",
-    "vision": "my-vision"
+  "asr": {
+    "model": "provider/asr-model-id",
+    "base_url": "https://provider.example/v1",
+    "api_key": "REPLACE_WITH_ASR_API_KEY",
+    "timeout_seconds": 300,
+    "max_attempts": 3,
+    "requests_per_minute": null,
+    "input_cost_per_million": null,
+    "output_cost_per_million": null,
+    "audio_cost_per_minute": null
   },
   "runtime": {
     "max_video_duration_seconds": 7200,
@@ -85,16 +65,16 @@ the provider credential in `api_key`. Keep this user-owned file private.
     "segment_overlap_seconds": 2,
     "max_media_workers": 2,
     "max_asr_workers": 4,
-    "max_vision_workers": 2,
+    "max_video_workers": 2,
     "max_global_workers": 6,
     "max_job_cost_usd": null
   }
 }
 ```
 
-Role adapters currently require OpenAI-compatible transcription and chat/image
-endpoints. Provider model identifiers, endpoint compatibility, request limits,
-timestamps, and prices must be checked with the provider before use. See
+The adapters require OpenAI-compatible transcription and chat endpoints.
+Provider model identifiers, endpoint compatibility, request limits, timestamps,
+and prices must be checked with the provider before use. See
 [reference.md](reference.md) for the status of provider comparisons.
 
 ## Commands
@@ -113,9 +93,8 @@ timestamps, and prices must be checked with the provider before use. See
   visual evidence overlapping a source-relative time range.
 - `kvedio-agent ask JOB_ID "What changed later?"` continues the latest session;
   pass `--session SESSION_ID` to select another one.
-- `kvedio-agent models` lists model roles and whether their environment keys are
-  available. It never prints key values.
-- `kvedio-agent bind ROLE MODEL` changes a persisted role binding.
+- `kvedio-agent models` lists the configured connections and whether each has a
+  key. It never prints key values.
 - `kvedio-agent cancel JOB_ID` marks work cancelled; `delete JOB_ID` removes
   generated job data and leaves the source video untouched.
 

@@ -25,15 +25,7 @@ from kvedio_agent.platform.providers import (
     OpenAICompatibleASR,
     OpenAICompatibleVision,
 )
-from kvedio_agent.platform.settings import (
-    Role,
-    RuntimeState,
-    Settings,
-    ensure_settings,
-    load_state,
-    save_state,
-    settings_path,
-)
+from kvedio_agent.platform.settings import Settings, ensure_settings, settings_path
 from kvedio_agent.platform.storage import Store
 
 app = typer.Typer(name="kvedio-agent", help="Local long-video analysis workbench")
@@ -51,23 +43,27 @@ def _load_settings() -> Settings:
         raise typer.Exit(code=1) from None
     if settings is None:
         raise typer.Exit(code=0)
-    resolved = settings.with_state(load_state())
     store.recover_interrupted_work()
-    store.cleanup_expired(Config.from_settings(resolved).retention_days)
-    return resolved
+    store.cleanup_expired(Config.from_settings(settings).retention_days)
+    return settings
 
 
 def _print_models(settings: Settings) -> None:
-    """Render configured models and role bindings without resolving secrets."""
+    """Render the configured connections without resolving secrets."""
 
     table = Table(title="Configured models")
-    table.add_column("Name")
-    table.add_column("Roles")
+    table.add_column("Capability")
     table.add_column("Model")
+    table.add_column("Endpoint")
     table.add_column("Key")
-    for name, entry in settings.models.items():
-        key_state = "configured" if entry.resolve_key() else "missing"
-        table.add_row(name, ", ".join(entry.roles), entry.model, key_state)
+    for capability, entry in (("video", settings.video), ("asr", settings.asr)):
+        if entry is None:
+            table.add_row(capability, "not configured", "", "")
+            continue
+        table.add_row(
+            capability, entry.model, entry.base_url or "provider default",
+            "configured" if entry.resolve_key() else "missing",
+        )
     console.print(table)
     console.print(f"Settings: {settings_path()}")
 
@@ -100,21 +96,14 @@ def _print_jobs() -> None:
     console.print(table)
 
 
-def _model(settings: Settings, role: Role) -> tuple[str, Any] | None:
-    try:
-        return settings.resolve(role)
-    except LookupError:
-        return None
+def _text(settings: Settings, job_id: str | None = None) -> LiteLLMChat:
+    """Open the text surface of the video connection for one job's reasoning calls."""
 
-
-def _chat(settings: Settings, job_id: str | None = None) -> LiteLLMChat:
-    selected = _model(settings, "chat")
-    if selected is None:
-        raise typer.BadParameter("Bind a chat model first with `kvedio-agent bind chat NAME`.")
+    entry = settings.video
     gate = None
     if job_id is not None:
-        gate = ProviderGate(store, selected[1], Config.from_settings(settings).max_job_cost_usd)
-    return LiteLLMChat(selected[1], selected[1].timeout_seconds, gate, job_id)
+        gate = ProviderGate(store, entry, Config.from_settings(settings).max_job_cost_usd)
+    return LiteLLMChat(entry, entry.timeout_seconds, gate, job_id)
 
 
 def _evidence_context(
@@ -133,15 +122,11 @@ def _evidence_context(
     if not manifest_path.exists():
         raise typer.BadParameter("Media manifest is missing; resume the job to rebuild it.")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    asr_binding = _model(settings, "asr")
-    vision_binding = _model(settings, "vision")
-    if not asr_binding and any(item.get("audio") for item in manifest["segments"]):
-        raise typer.BadParameter("Bind an ASR model with `kvedio-agent bind asr NAME`.")
-    asr_entry = asr_binding[1] if asr_binding else None
-    vision_entry = vision_binding[1] if vision_binding else None
+    asr_entry = settings.asr
+    video_entry = settings.video
     total = len(manifest["segments"])
     scheduler = StageScheduler(store, config.max_global_workers)
-    modality_count = int(asr_entry is not None) + int(vision_entry is not None)
+    modality_count = 1 + int(asr_entry is not None)
     with Progress(
         SpinnerColumn(), TextColumn("{task.description}"), BarColumn(),
         TextColumn("{task.completed}/{task.total}"), console=console,
@@ -187,47 +172,46 @@ def _evidence_context(
                 max_attempts=asr_entry.max_attempts,
             )
 
-        if vision_entry:
-            vision_units = [
-                WorkUnit(segment["id"], segment["start_ms"], segment["end_ms"], segment)
-                for segment in manifest["segments"]
-                if segment.get("keyframes")
-                and not store.evidence_exists(
-                    job_id, "visual", segment["start_ms"], segment["end_ms"]
-                )
-            ]
+        video_units = [
+            WorkUnit(segment["id"], segment["start_ms"], segment["end_ms"], segment)
+            for segment in manifest["segments"]
+            if segment.get("keyframes")
+            and not store.evidence_exists(
+                job_id, "visual", segment["start_ms"], segment["end_ms"]
+            )
+        ]
 
-            def inspect(unit: WorkUnit) -> Any:
-                provider = OpenAICompatibleVision(
-                    vision_entry,
-                    vision_entry.timeout_seconds,
-                    ProviderGate(store, vision_entry, config.max_job_cost_usd),
-                    job_id,
-                )
-                return provider.describe(
-                    list(zip(
-                        [Path(path) for path in unit.payload["keyframes"]],
-                        unit.payload["frame_times_ms"],
-                    )),
-                    unit.start_ms,
-                    unit.end_ms,
-                )
-
-            def save_observation(unit: WorkUnit, observation: Any) -> None:
-                store.add_evidence(
-                    job_id, "visual", unit.start_ms, unit.end_ms,
-                    {"provider_model": vision_entry.model}, observation.summary,
-                    confidence=observation.confidence,
-                )
-                progress.advance(task_id)
-
-            scheduler.run(
-                job_id, "inspect_visuals", vision_units, inspect, save_observation,
-                max_workers=min(config.max_vision_workers, config.max_global_workers),
-                max_attempts=vision_entry.max_attempts,
+        def inspect(unit: WorkUnit) -> Any:
+            provider = OpenAICompatibleVision(
+                video_entry,
+                video_entry.timeout_seconds,
+                ProviderGate(store, video_entry, config.max_job_cost_usd),
+                job_id,
+            )
+            return provider.describe(
+                list(zip(
+                    [Path(path) for path in unit.payload["keyframes"]],
+                    unit.payload["frame_times_ms"],
+                )),
+                unit.start_ms,
+                unit.end_ms,
             )
 
-    service = AnalysisService(store, EvidenceIndex(store), _chat(settings, job_id))
+        def save_observation(unit: WorkUnit, observation: Any) -> None:
+            store.add_evidence(
+                job_id, "visual", unit.start_ms, unit.end_ms,
+                {"provider_model": video_entry.model}, observation.summary,
+                confidence=observation.confidence,
+            )
+            progress.advance(task_id)
+
+        scheduler.run(
+            job_id, "inspect_visuals", video_units, inspect, save_observation,
+            max_workers=min(config.max_video_workers, config.max_global_workers),
+            max_attempts=video_entry.max_attempts,
+        )
+
+    service = AnalysisService(store, EvidenceIndex(store), _text(settings, job_id))
     scratchpad.current_stage = "understand_segments"
     completed_ranges = set(scratchpad.completed_ranges)
     milestone_ranges: list[tuple[int, int]] = []
@@ -322,11 +306,9 @@ def _run_analysis(
     video: Path, objective: str, settings: Settings, job_id: str | None = None
 ) -> tuple[str, str]:
     config = Config.from_settings(settings)
-    provider_identity = {
-        role: selected[1].model
-        for role in ("chat", "asr", "vision")
-        if (selected := _model(settings, role)) is not None
-    }
+    provider_identity: dict[str, str] = {"video": settings.video.model}
+    if settings.asr is not None:
+        provider_identity["asr"] = settings.asr.model
     source_id, resolved_job_id, media = MediaProcessor(store, config).preprocess(
         video, objective, provider_identity
     )
@@ -345,7 +327,7 @@ def _run_analysis(
         job_id, objective
     )
     result = AnalysisService(
-        store, EvidenceIndex(store), _chat(settings, job_id)
+        store, EvidenceIndex(store), _text(settings, job_id)
     ).analyze(job_id, objective)
     store.add_message(conversation_id, "user", objective)
     evidence_ids = [item for claim in result.claims for item in claim.evidence_ids]
@@ -357,7 +339,7 @@ def _run_analysis(
 
 @app.command("models")
 def models_command() -> None:
-    """List configured models and role bindings."""
+    """List the configured provider connections."""
 
     _print_models(_load_settings())
 
@@ -377,21 +359,6 @@ def config_command() -> None:
 
     for key, value in Config.from_settings(_load_settings()).model_dump().items():
         console.print(f"{key}: {value}")
-
-
-@app.command("bind")
-def bind_command(role: Role, model: str) -> None:
-    """Persist a model binding for one role."""
-
-    settings = _load_settings()
-    try:
-        settings.resolve(role, model)
-    except LookupError as exc:
-        raise typer.BadParameter(str(exc)) from None
-    state = load_state()
-    state.active[role] = model
-    save_state(RuntimeState(active=state.active))
-    console.print(f"Bound {role} to {model}")
 
 
 @app.command("jobs")
@@ -491,7 +458,7 @@ def ask_command(job_id: str, question: str, session_id: str | None = None) -> No
     if selected is None:
         selected = store.create_conversation(job["id"], question)
     result = AnalysisService(
-        store, EvidenceIndex(store), _chat(settings, job["id"])
+        store, EvidenceIndex(store), _text(settings, job["id"])
     ).follow_up(
         job["id"], selected, question
     )
@@ -506,7 +473,7 @@ def locate_command(job_id: str, start_ms: int, end_ms: int) -> None:
     job = _job(job_id)
     settings = _load_settings()
     result = AnalysisService(
-        store, EvidenceIndex(store), _chat(settings, job["id"])
+        store, EvidenceIndex(store), _text(settings, job["id"])
     ).locate(job["id"], start_ms, end_ms)
     table = Table(title=f"Evidence {result.start_ms}..{result.end_ms} ms")
     table.add_column("Evidence")
@@ -553,7 +520,7 @@ def workbench_command() -> None:
         if selected is None:
             selected = store.create_conversation(job_id, question)
         return AnalysisService(
-            store, EvidenceIndex(store), _chat(settings, job_id)
+            store, EvidenceIndex(store), _text(settings, job_id)
         ).follow_up(job_id, selected, question)
 
     def upload(video: Path) -> UploadProgress:

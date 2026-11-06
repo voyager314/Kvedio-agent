@@ -115,8 +115,8 @@ class LiteLLMChat:
         }
         if key := self.model.resolve_key():
             kwargs["api_key"] = key
-        if self.model.api_base:
-            kwargs["api_base"] = self.model.api_base
+        if self.model.base_url:
+            kwargs["api_base"] = self.model.base_url
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -192,10 +192,10 @@ class OpenAICompatibleASR:
         gate: ProviderGate | None = None,
         job_id: str | None = None,
     ) -> None:
-        if not model.api_base or not model.resolve_key():
+        if not model.base_url or not model.resolve_key():
             raise ProviderError("missing_provider_configuration", retryable=False)
         self.model = model
-        self.api_base = model.api_base.rstrip("/")
+        self.base_url = model.base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.gate = gate
         self.job_id = job_id
@@ -207,7 +207,7 @@ class OpenAICompatibleASR:
         try:
             with audio_path.open("rb") as audio:
                 response = httpx.post(
-                    self.api_base + "/audio/transcriptions",
+                    self.base_url + "/audio/transcriptions",
                     headers={"Authorization": "Bearer " + (self.model.resolve_key() or "")},
                     data={"model": self.model.model, "response_format": "verbose_json"},
                     files={"file": (audio_path.name, audio, "audio/wav")},
@@ -262,10 +262,10 @@ class OpenAICompatibleVision:
         gate: ProviderGate | None = None,
         job_id: str | None = None,
     ) -> None:
-        if not model.api_base or not model.resolve_key():
+        if not model.base_url or not model.resolve_key():
             raise ProviderError("missing_provider_configuration", retryable=False)
         self.model = model
-        self.api_base = model.api_base.rstrip("/")
+        self.base_url = model.base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.gate = gate
         self.job_id = job_id
@@ -296,7 +296,7 @@ class OpenAICompatibleVision:
         reservation = self._reserve(frames, start_ms)
         try:
             response = httpx.post(
-                self.api_base + "/chat/completions",
+                self.base_url + "/chat/completions",
                 headers={"Authorization": "Bearer " + (self.model.resolve_key() or "")},
                 json=payload,
                 timeout=self.timeout_seconds,

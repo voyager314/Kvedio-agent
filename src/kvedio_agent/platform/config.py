@@ -18,7 +18,7 @@ class Config(BaseModel):
     segment_overlap_seconds: int = Field(default=2, ge=0)  # Overlap in seconds; zero disables it.
     max_media_workers: int = Field(default=2, gt=0)  # Positive preprocessing worker limit.
     max_asr_workers: int = Field(default=4, gt=0)  # Positive ASR stage worker limit.
-    max_vision_workers: int = Field(default=2, gt=0)  # Positive vision stage worker limit.
+    max_video_workers: int = Field(default=2, gt=0)  # Positive video stage worker limit.
     max_global_workers: int = Field(default=6, gt=0)  # Positive cap across active work stages.
     max_job_cost_usd: float | None = Field(default=None, ge=0)  # USD ceiling; None means unlimited.
 
