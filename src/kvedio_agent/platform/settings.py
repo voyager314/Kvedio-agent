@@ -86,6 +86,13 @@ class ModelEntry(BaseModel):
     output_cost_per_million: float | None = Field(default=None, ge=0)
     # USD per audio minute; None is unknown.
     audio_cost_per_minute: float | None = Field(default=None, ge=0)
+    # Input tokens one second of clip is billed for; None leaves the window at the
+    # configured ceiling.
+    video_tokens_per_second: float | None = Field(default=None, gt=0)
+    # Media tokens one observation call may spend; None leaves the window at the
+    # configured ceiling. Together with the rate above it sets how much recording
+    # one call reads.
+    video_budget_tokens: int | None = Field(default=None, gt=0)
 
     def resolve_key(self) -> str | None:
         """Return the provider credential configured for this connection."""

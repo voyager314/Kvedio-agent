@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -105,6 +106,8 @@ class AnalysisService:
         self, store: Store, index: EvidenceIndex, model: TextModel,
         gate: ProviderGate | None = None, job_id: str | None = None,
         assembler: ContextAssembler | None = None,
+        clip_observer: Callable[[int, int], list[dict[str, Any]]] | None = None,
+        max_clip_ms: int = 0,
     ) -> None:
         self.store = store
         self.index = index
@@ -113,6 +116,8 @@ class AnalysisService:
         self.job_id = job_id
         self.prompts = PromptRenderer()
         self.assembler = assembler or ContextAssembler(index.budget)
+        self.clip_observer = clip_observer
+        self.max_clip_ms = max_clip_ms
 
     def understand_segment(
         self, job_id: str, start_ms: int, end_ms: int, retention_days: int = 30
@@ -196,15 +201,33 @@ class AnalysisService:
         return chapters
 
     def analyze(self, job_id: str, objective: str) -> AnalysisResult:
-        """Answer an objective from retrieved evidence and the chapter map."""
+        """Answer an objective from retrieved evidence and the chapter map.
+
+        The returned stage trace is the durable stage record, not what the model
+        claims it did: the record exists independently of the answer and is the only
+        account of the run a caller can check.
+        """
 
         evidence = self.index.retrieve(job_id, objective)
         chapters = self.store.evidence_for_modality(job_id, "timeline_summary")
         if not evidence and not chapters:
             raise ValueError("no matching evidence is available")
-        return self._answer_with_tools(
+        result = self._answer_with_tools(
             "answer", job_id, "final_answer", {"objective": objective}, evidence, chapters
         )
+        return result.model_copy(update={"stage_trace": self._recorded_stages(job_id)})
+
+    def _recorded_stages(self, job_id: str) -> list[str]:
+        """Render the durable stage record as one line per stage, in execution order."""
+
+        return [
+            f"{stage['name']}: {stage['status']}"
+            f" (attempt {stage.get('attempt') or 0},"
+            f" progress {float(stage.get('progress') or 0):.0%}"
+            + (f", {stage['error_category']}" if stage.get("error_category") else "")
+            + ")"
+            for stage in self.store.job_stages(job_id)
+        ]
 
     def locate(self, job_id: str, start_ms: int, end_ms: int) -> ContentLocation:
         """Return original evidence overlapping the requested source-relative range."""
@@ -266,6 +289,7 @@ class AnalysisService:
             "follow_up", job_id, "follow_up",
             {"tool_instruction": self.prompts.render("tool_selection"), "question": question},
             evidence, chapters, messages,
+            clip_observer=self.clip_observer,
         )
         evidence_ids = [
             evidence_id for claim in result.claims for evidence_id in claim.evidence_ids
@@ -277,6 +301,7 @@ class AnalysisService:
         self, stage: str, job_id: str, template: str, variables: dict[str, Any],
         evidence: list[dict[str, Any]], chapters: list[dict[str, Any]],
         history: list[dict[str, Any]] | None = None, max_rounds: int = 3,
+        clip_observer: Callable[[int, int], list[dict[str, Any]]] | None = None,
     ) -> AnalysisResult:
         """Answer one question under the budget, folding tool output into a rebuilt context.
 
@@ -288,10 +313,14 @@ class AnalysisService:
         template: prompt template name; it receives the assembled block as `context`.
         variables: remaining template variables, none of which may carry evidence.
         evidence: retrieved rows; extended in place when a tool discovers more.
+        clip_observer: rewatch hook offered as a tool, or None when the answer may not
+        ask for footage again.
         Raises a provider error when the rounds run out with a tool call outstanding.
         """
 
-        registry = JobToolRegistry(self.store, job_id)
+        registry = JobToolRegistry(
+            self.store, job_id, clip_observer, self.max_clip_ms
+        )
         tool_results: list[dict[str, Any]] = []
         for _ in range(max_rounds + 1):
             assembled = self.assembler.assemble(

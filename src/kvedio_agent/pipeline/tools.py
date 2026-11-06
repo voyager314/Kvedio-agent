@@ -25,11 +25,25 @@ class ToolSpec:
 
 
 class JobToolRegistry:
-    """Expose evidence, job state, and validated local file access."""
+    """Expose evidence, job state, and validated local file access.
 
-    def __init__(self, store: Store, job_id: str) -> None:
+    - Evidence, job state, and files are read from the bound job only.
+    - Clip observation is offered only when the caller supplied an observer, because a
+      tool with no way to answer would be offered and then fail.
+    - A clip range already observed in this turn is answered with the record it
+      produced, so a model repeating itself does not buy the same frames twice.
+    """
+
+    def __init__(
+        self, store: Store, job_id: str,
+        clip_observer: Callable[[int, int], list[dict[str, Any]]] | None = None,
+        max_clip_ms: int = 0,
+    ) -> None:
         self.store = store
         self.job_id = job_id
+        self.clip_observer = clip_observer
+        self.max_clip_ms = max_clip_ms
+        self._observed: dict[tuple[int, int], list[dict[str, Any]]] = {}
         self._specs = self._build_specs()
 
     def schemas(self) -> list[dict[str, Any]]:
@@ -64,6 +78,18 @@ class JobToolRegistry:
             raise ToolCallError("invalid tool arguments") from None
 
     def _build_specs(self) -> dict[str, ToolSpec]:
+        specs = self._base_specs()
+        if self.clip_observer is not None:
+            specs["inspect_clip"] = ToolSpec(
+                "inspect_clip",
+                "Watch a bounded part of the recording again and report what happens "
+                "there. Use it when the record cannot answer and the picture or speech "
+                "inside a specific range would.",
+                _range_schema(), self._inspect_clip,
+            )
+        return specs
+
+    def _base_specs(self) -> dict[str, ToolSpec]:
         return {
             "search_evidence": ToolSpec(
                 "search_evidence",
@@ -163,6 +189,33 @@ class JobToolRegistry:
 
     def _get_visual(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"evidence": _evidence_rows(self._range(arguments, "visual"))}
+
+    def _inspect_clip(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Observe one bounded range and return the evidence rows it produced.
+
+        A range wider than max_clip_ms is narrowed to its opening rather than
+        refused, because a model asking for too much still wants an answer. The
+        narrowed bounds are reported so the caller can see what was read.
+        """
+
+        observer = self.clip_observer
+        if observer is None:
+            raise ToolCallError("clip observation is not available")
+        start_ms = arguments["start_ms"]
+        end_ms = arguments["end_ms"]
+        if not isinstance(start_ms, int) or not isinstance(end_ms, int):
+            raise ToolCallError("time bounds must be integers in milliseconds")
+        if start_ms < 0 or end_ms <= start_ms:
+            raise ToolCallError("time range must be positive and ordered")
+        if self.max_clip_ms and end_ms - start_ms > self.max_clip_ms:
+            end_ms = start_ms + self.max_clip_ms
+        key = (start_ms, end_ms)
+        if key not in self._observed:
+            self._observed[key] = observer(start_ms, end_ms)
+        return {
+            "start_ms": start_ms, "end_ms": end_ms,
+            "evidence": self._observed[key],
+        }
 
     def _get_progress(self, _: dict[str, Any]) -> dict[str, Any]:
         job = next((item for item in self.store.job_history() if item["id"] == self.job_id), None)

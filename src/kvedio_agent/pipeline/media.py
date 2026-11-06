@@ -144,7 +144,7 @@ class MediaProcessor:
             if not audio_path.exists() and media.audio_streams:
                 self._write_audio(source, start_ms, end_ms, audio_path)
             if not clip_path.exists() and media.video_streams:
-                self._write_clip(source, start_ms, end_ms, clip_path)
+                self.write_clip(source, start_ms, end_ms, clip_path)
 
         with ThreadPoolExecutor(max_workers=self.config.max_media_workers) as pool:
             list(pool.map(generate, specs))
@@ -207,7 +207,7 @@ class MediaProcessor:
                 wav.setframerate(16_000)
                 wav.writeframes(b"".join(chunks))
 
-    def _write_clip(self, source: Path, start_ms: int, end_ms: int, target: Path) -> int:
+    def write_clip(self, source: Path, start_ms: int, end_ms: int, target: Path) -> int:
         """Re-encode one source window as an mp4 clip and return the frames it holds.
 
         The window is resampled to the configured perception frame rate and scaled

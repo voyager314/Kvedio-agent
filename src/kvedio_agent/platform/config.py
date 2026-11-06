@@ -29,10 +29,24 @@ class Config(BaseModel):
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Config:
-        """Build runtime parameters from the optional settings runtime object."""
+        """Build runtime parameters from settings, sizing the clip to the video connection.
+
+        The window one perception call reads follows the rate the configured model
+        bills media at, so the same settings read ten minutes per call on a cheap
+        model and two on an expensive one. Deriving it here rather than in the stage
+        keeps the window that produced a manifest identical to the window a later
+        run expects, which is what makes preprocessing resumable.
+        """
 
         try:
-            return cls.model_validate(settings.runtime)
+            config = cls.model_validate(settings.runtime)
         except ValidationError:
             raise ValueError("invalid runtime configuration") from None
+        rate = settings.video.video_tokens_per_second
+        budget = settings.video.video_budget_tokens
+        if rate is None or budget is None:
+            return config
+        affordable = max(1, int(budget / rate))
+        window = min(config.max_segment_duration_seconds, affordable)
+        return config.model_copy(update={"max_segment_duration_seconds": window})
 

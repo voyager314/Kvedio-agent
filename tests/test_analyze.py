@@ -162,6 +162,67 @@ def test_follow_up_executes_bounded_read_only_tool_call(tmp_path: Path) -> None:
     assert result.claims[0].evidence_ids == [evidence_id]
 
 
+def test_analyze_accepts_evidence_a_tool_turned_up(tmp_path: Path) -> None:
+    store = Store(tmp_path / "workspace")
+    job_id, evidence_id, _ = _job(store, tmp_path)
+    budget_id = store.add_evidence(job_id, "transcript", 4000, 5000, {}, "budget approved")
+
+    class SearchingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(
+            self, system: str, prompt: str,
+            tools: list[dict[str, object]] | None = None,
+        ) -> Completion:
+            self.calls += 1
+            if self.calls == 1:
+                return Completion(
+                    "",
+                    tool_calls=(
+                        {"id": "c1", "name": "search_evidence",
+                         "arguments": '{"query":"budget"}'},
+                    ),
+                )
+            return Completion(json.dumps({
+                "objective": "explain launch",
+                "plan": [],
+                "claims": [{
+                    "text": "Budget approved", "evidence_ids": [budget_id],
+                    "confidence": 0.8,
+                }],
+                "uncertainties": [],
+                "quality_assessment": "Supported by the discovered row.",
+            }))
+
+    result = AnalysisService(store, EvidenceIndex(store), SearchingModel()).analyze(
+        job_id, "launch"
+    )
+    assert result.claims[0].evidence_ids == [budget_id]
+    assert evidence_id
+
+
+def test_analyze_reports_the_durable_stage_record_not_the_model_plan(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "workspace")
+    job_id, evidence_id, _ = _job(store, tmp_path)
+    store.upsert_stage(job_id, "transcribe", "completed", progress=1)
+    store.upsert_stage(job_id, "observe_clips", "retryable_failed", attempt=2, progress=0.5)
+    model = FakeModel({
+        "objective": "explain launch",
+        "plan": ["say something plausible"],
+        "claims": [{"text": "Launch approved", "evidence_ids": [evidence_id], "confidence": 0.9}],
+        "uncertainties": [],
+        "quality_assessment": "One item supports the claim.",
+        "stage_trace": ["the model's own account"],
+    })
+    result = AnalysisService(store, EvidenceIndex(store), model).analyze(job_id, "launch")
+    assert result.stage_trace[0].startswith("transcribe: completed")
+    assert "observe_clips: retryable_failed" in result.stage_trace[1]
+    assert "the model's own account" not in result.stage_trace
+
+
 def test_segment_and_timeline_agents_persist_only_valid_evidence_links(
     tmp_path: Path,
 ) -> None:

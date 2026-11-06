@@ -17,7 +17,12 @@
     "input_cost_per_million": null,
     "output_cost_per_million": null,
     // USD per audio minute; null means the price is unknown.
-    "audio_cost_per_minute": null
+    "audio_cost_per_minute": null,
+    // Input tokens one second of clip is billed for, and the media tokens one
+    // observation call may spend. Together they set the window read per call;
+    // null leaves max_segment_duration_seconds as the window.
+    "video_tokens_per_second": null,
+    "video_budget_tokens": null
   },
   // Connection that transcribes audio. Delete this object to leave speech untranscribed.
   "asr": {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -281,6 +282,55 @@ def _evidence_context(
     return EvidenceIndex(store).retrieve(job_id, "")
 
 
+def _clip_observer(
+    settings: Settings, job_id: str
+) -> Callable[[int, int], list[dict[str, Any]]]:
+    """Return a hook that watches one range again and records what it reports.
+
+    Observing a range costs a provider call, so the hook runs only when a follow-up
+    asks for one. What it reports is stored as evidence before it is returned, which
+    is what makes a second question about the same range a database read.
+    """
+
+    config = Config.from_settings(settings)
+
+    def observe(start_ms: int, end_ms: int) -> list[dict[str, Any]]:
+        job = next((row for row in store.job_history() if row["id"] == job_id), None)
+        if job is None:
+            raise ValueError("job does not exist")
+        source = Path(job["source_path"])
+        manifest_path = MediaProcessor(store, config).manifest_path(
+            fingerprint(source).digest
+        )
+        if not manifest_path.exists():
+            raise ValueError("media manifest is missing")
+        clip_path = store.root / "artifacts" / fingerprint(source).digest / "clips"
+        clip_path.mkdir(parents=True, exist_ok=True)
+        target = clip_path / f"{start_ms:012d}-{end_ms:012d}.mp4"
+        if not target.exists():
+            MediaProcessor(store, config).write_clip(source, start_ms, end_ms, target)
+        entry = settings.video
+        provider = OpenAICompatibleVideo(
+            entry, entry.timeout_seconds,
+            ProviderGate(store, entry, config.max_job_cost_usd), job_id,
+        )
+        events = provider.observe(target, start_ms, end_ms, config.max_clip_events)
+        rows: list[dict[str, Any]] = []
+        for event in events:
+            evidence_id = store.add_evidence(
+                job_id, "visual", event.start_ms, event.end_ms,
+                {"provider_model": entry.model, "entities": list(event.entities)},
+                event.text,
+            )
+            rows.append({
+                "evidence_id": evidence_id, "start_ms": event.start_ms,
+                "end_ms": event.end_ms, "modality": "visual", "content": event.text,
+            })
+        return rows
+
+    return observe
+
+
 def _render_result(result: dict[str, Any]) -> None:
     console.print(Panel(str(result.get("quality_assessment", "")), title="Quality"))
     console.print(Panel("\n".join(result.get("plan", [])), title="Execution plan"))
@@ -454,7 +504,9 @@ def ask_command(job_id: str, question: str, session_id: str | None = None) -> No
     if selected is None:
         selected = store.create_conversation(job["id"], question)
     result = AnalysisService(
-        store, EvidenceIndex(store), _text(settings, job["id"])
+        store, EvidenceIndex(store), _text(settings, job["id"]),
+        clip_observer=_clip_observer(settings, job["id"]),
+        max_clip_ms=Config.from_settings(settings).max_segment_duration_seconds * 1000,
     ).follow_up(
         job["id"], selected, question
     )
@@ -516,7 +568,9 @@ def workbench_command() -> None:
         if selected is None:
             selected = store.create_conversation(job_id, question)
         return AnalysisService(
-            store, EvidenceIndex(store), _text(settings, job_id)
+            store, EvidenceIndex(store), _text(settings, job_id),
+            clip_observer=_clip_observer(settings, job_id),
+            max_clip_ms=Config.from_settings(settings).max_segment_duration_seconds * 1000,
         ).follow_up(job_id, selected, question)
 
     def upload(video: Path) -> UploadProgress:

@@ -100,6 +100,24 @@ def test_runtime_defaults_match_local_video_limits() -> None:
     assert config.retention_days == 30
 
 
+def test_clip_window_follows_the_billed_media_rate() -> None:
+    settings = Settings(
+        video=ModelEntry(
+            model="provider/video", video_tokens_per_second=300, video_budget_tokens=60_000,
+        ),
+        runtime={"max_segment_duration_seconds": 900},
+    )
+    assert Config.from_settings(settings).max_segment_duration_seconds == 200
+
+
+def test_clip_window_stays_capped_without_a_billed_rate() -> None:
+    settings = Settings(
+        video=ModelEntry(model="provider/video"),
+        runtime={"max_segment_duration_seconds": 900},
+    )
+    assert Config.from_settings(settings).max_segment_duration_seconds == 900
+
+
 def test_provider_reference_is_packaged_resource() -> None:
     reference = resources.files("kvedio_agent.defaults").joinpath("reference.md")
     assert "Model Provider Reference" in reference.read_text(encoding="utf-8")
