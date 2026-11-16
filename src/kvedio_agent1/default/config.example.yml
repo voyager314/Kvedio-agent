@@ -1,0 +1,47 @@
+# kvedio_agent 用户配置
+# 位置：~/.kvedio_agent/config.yml
+#
+# 本文件在首次运行时由程序创建，之后由用户维护：程序只读，不写回，
+# 以免覆盖这里的注释与排版。程序自己的选择（当前使用哪个绑定）记在同目录的 state.yml。
+#
+# api_key 支持两种写法：
+#   api_key: env:DASHSCOPE_API_KEY   # 引用环境变量，推荐
+#   api_key: sk-...                  # 直接写入，注意本文件权限
+#
+# 每个角色可声明多个绑定，用 name 区分，在终端里用 /model 查看与切换。
+# 三类角色都按 OpenAI 兼容协议接入：supervisor 用 chat/completions，
+# asr 用 audio/transcriptions，video 用带 image_url 的 chat/completions。
+
+active:
+  supervisor: deepseek
+  asr: dashscope
+  video: dashscope
+
+roles:
+  supervisor:
+    - name: deepseek
+      model: deepseek-chat
+      api_base: https://api.deepseek.com/v1
+      api_key: env:DEEPSEEK_API_KEY
+  asr:
+    - name: dashscope
+      model: qwen3-asr-flash
+      api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+      api_key: env:DASHSCOPE_API_KEY
+  video:
+    - name: dashscope
+      model: qwen-vl-max
+      api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+      api_key: env:DASHSCOPE_API_KEY
+
+runtime:
+  # 接受的最长源视频时长，单位秒。
+  max_video_duration_seconds: 7200
+  # 作业产物保留天数；源视频从不删除。
+  retention_days: 30
+  # 同时运行的任务数上限。
+  max_global_workers: 6
+  # 单次上游调用的超时，单位秒。
+  request_timeout_seconds: 120
+  # 产物目录；null 表示 ~/.kvedio_agent/workspace。
+  workspace_dir: null
