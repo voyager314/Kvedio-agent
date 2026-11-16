@@ -18,6 +18,7 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import DataTable, Header, Input, RichLog, Static
 
 from ...core.config import Loaded, Role, is_usable
@@ -414,13 +415,21 @@ class Workbench(App[None]):
         )
 
     def _pump(self) -> None:
-        """Drain published events on the interface thread and render each one."""
+        """Drain published events on the interface thread and render each one.
+
+        A worker can publish after the panels are gone — quitting, or a test that
+        ends mid-job. An event with nothing left to render into is dropped rather
+        than raised out of the timer, where it would hide the original failure.
+        """
         while True:
             try:
                 event = self._events.get_nowait()
             except queue.Empty:
                 return
-            self._apply(event)
+            try:
+                self._apply(event)
+            except NoMatches:
+                return
 
     def _apply(self, event: Event) -> None:
         kind = event.kind
