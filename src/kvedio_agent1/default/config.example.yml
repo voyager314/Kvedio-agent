@@ -42,6 +42,14 @@ runtime:
   max_global_workers: 6
   # 单次上游调用的超时，单位秒。
   request_timeout_seconds: 120
+  # 单个阶段的时间预算下限，单位秒；预算按媒体时长推导，不足此值时取此值。
+  # 内置倍率：探测 0.05、音轨 0.5、转写 1.5、记忆 0.5、场景 1.5、事件 0.5；
+  # 作答按请求超时的 6 倍，初步结论按 3 倍。
+  stage_budget_floor_seconds: 300
+  # 预算整体倍数：机器较慢可调大，想更早发现停滞可调小。
+  stage_budget_scale: 1.0
+  # 所有阶段预算的硬上限，单位秒；0 表示不设上限。
+  stage_budget_ceiling_seconds: 0
   # 单次转写请求承载的音频长度，单位秒。
   asr_chunk_seconds: 300
   # 同时发出的转写请求数。

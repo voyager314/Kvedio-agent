@@ -41,6 +41,9 @@ def test_first_load_creates_the_packaged_template(home):
     assert loaded.config.runtime.asr_chunk_seconds == 300
     assert loaded.config.runtime.asr_concurrency == 2
     assert loaded.config.runtime.coverage_block_seconds == 180
+    assert loaded.config.runtime.stage_budget_floor_seconds == 300
+    assert loaded.config.runtime.stage_budget_scale == 1.0
+    assert loaded.config.runtime.stage_budget_ceiling_seconds == 0
 
 
 def test_second_load_leaves_the_user_file_alone(home):
@@ -81,6 +84,13 @@ def test_a_literal_key_never_appears_in_a_failure(home):
     assert "runtime.max_global_workers" in message
     assert secret not in message
     assert "a1b2c3d4" not in message
+
+
+def test_a_zero_budget_scale_is_refused(home):
+    path = write_config(home, {"runtime": {"stage_budget_scale": 0}})
+
+    with pytest.raises(ConfigError, match="runtime.stage_budget_scale"):
+        load(path)
 
 
 def test_a_binding_hides_its_key_from_repr_and_serialization():

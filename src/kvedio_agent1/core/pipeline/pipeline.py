@@ -32,13 +32,22 @@ from ..domain import (
     EventKind,
     JobRecord,
     NewTask,
+    TaskRecord,
     VideoRecord,
 )
 from ..media import extract_audio, identify, probe
 from ..memory import MemoryBuilder
 from ..storage import Storage, StorageError
 from ..supervisor import Answering
-from ..tasks import Cancellation, Cancelled, EventBus, Scheduler, TaskContext
+from ..tasks import (
+    Cancellation,
+    Cancelled,
+    EventBus,
+    Scheduler,
+    TaskContext,
+    TaskTimeout,
+    stage_budget,
+)
 from ..vision import EventBuilder, VisionBuilder
 from ..workspace import Workspace
 
@@ -131,8 +140,16 @@ class Pipeline:
             "answer_preliminary": self._answer_early,
             "answer": self._answer,
         }
+
+        def budget(task: TaskRecord) -> float:
+            video = self._store.video(job.video_id)
+            duration = (
+                video.media.duration_ms if video is not None and video.media is not None else 0
+            )
+            return stage_budget(task.action, duration, self._stages.runtime)
+
         try:
-            return self._scheduler.run(job, handlers, signal)
+            return self._scheduler.run(job, handlers, signal, budget)
         finally:
             with self._tokens:
                 self._cancellations.pop(job.id, None)
@@ -325,7 +342,7 @@ class Pipeline:
         The length ceiling is checked before the record is written: a source the
         product will not analyse should not appear on the timeline as usable.
         """
-        context.raise_if_cancelled()
+        context.check()
         video = self._video(context)
         context.report(0.05, "打开容器")
         media = probe(video.path)
@@ -350,7 +367,7 @@ class Pipeline:
         A source without an audio track is a finished stage, not a failure: there
         is nothing to transcribe, and the answer stage will say so.
         """
-        context.raise_if_cancelled()
+        context.check()
         video = self._video(context)
         if video.media is not None and video.media.audio_codec is None:
             self._log(context, "没有音轨，跳过转录")
@@ -369,7 +386,7 @@ class Pipeline:
 
     def _transcribe(self, context: TaskContext) -> None:
         """Produce the transcript, reusing every chunk a previous run finished."""
-        context.raise_if_cancelled()
+        context.check()
         video = self._video(context)
         if video.media is not None and video.media.audio_codec is None:
             context.report(1.0)
@@ -384,7 +401,7 @@ class Pipeline:
 
     def _memory(self, context: TaskContext) -> None:
         """Build the coverage map and the vector index, skipping what is already there."""
-        context.raise_if_cancelled()
+        context.check()
         builder = self._stages.memory
         if builder is None:
             context.report(1.0)
@@ -402,7 +419,7 @@ class Pipeline:
 
     def _vision(self, context: TaskContext) -> None:
         """Cut the recording into scenes and describe each one, skipping described ones."""
-        context.raise_if_cancelled()
+        context.check()
         builder = self._stages.vision
         if builder is None:
             context.report(1.0)
@@ -419,7 +436,7 @@ class Pipeline:
 
     def _events(self, context: TaskContext) -> None:
         """Name the events the shots belong to, so a reader can find a stretch."""
-        context.raise_if_cancelled()
+        context.check()
         builder = self._stages.events
         if builder is None:
             context.report(1.0)
@@ -437,11 +454,16 @@ class Pipeline:
         and the task still succeeds, so a preview that never reached the user does
         not turn the final job into a partial one. Cancellation is not swallowed.
         """
-        context.raise_if_cancelled()
+        try:
+            context.check()
+        except Cancelled:
+            raise
+        except TaskTimeout as error:
+            self._log(context, f"初步结论超时：{error}")
+            return
         answering = self._stages.answering
         if answering is None:
             self._log(context, "未配置对话模型，跳过初步结论")
-            context.report(1.0)
             return
         try:
             answer = answering.answer(
@@ -452,26 +474,27 @@ class Pipeline:
             )
         except Cancelled:
             raise
+        except TaskTimeout as error:
+            self._log(context, f"初步结论超时：{error}")
+            return
         except Exception as error:  # a preview must not decide the job's fate
             self._log(context, f"初步结论未生成：{error}")
-            context.report(1.0)
             return
-        context.report(1.0, f"初步结论引用 {len(answer.citations)} 处")
+        self._log(context, f"初步结论引用 {len(answer.citations)} 处")
 
     def _answer(self, context: TaskContext) -> None:
         """Answer from whatever evidence the video produced, naming any gap in the conclusion."""
-        context.raise_if_cancelled()
+        context.check()
         answering = self._stages.answering
         if answering is None:
             raise ValueError("未配置对话模型：supervisor")
         context.report(0.0, "开始作答")
-        answer = answering.answer(
+        answering.answer(
             context.job,
             context.report,
             cancelled=lambda: context.cancelled,
             preliminary=False,
         )
-        context.report(1.0, f"结论引用 {len(answer.citations)} 处")
 
     def _video(self, context: TaskContext) -> VideoRecord:
         video = self._store.video(context.job.video_id)

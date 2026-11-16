@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import kvedio_agent1.core.pipeline.pipeline as pipeline_module
 from kvedio_agent1.core.asr import AsrStage
 from kvedio_agent1.core.config.schema import RuntimeLimits
 from kvedio_agent1.core.domain import (
@@ -308,6 +309,14 @@ class _BrokenSpeech:
         raise RuntimeError("转写服务不可用")
 
 
+class _SlowSpeech:
+    """A transcriber that outlives the budget its stage was given."""
+
+    def __call__(self, audio: Path) -> list[Segment]:
+        time.sleep(0.15)
+        return spoken(audio)
+
+
 class _SceneWriter:
     """A describer that writes one scene, so a picture-only answer has evidence."""
 
@@ -475,6 +484,34 @@ def test_both_failed_branches_leave_no_conclusion(store, workspace, answerer, sa
     assert tasks["answer_preliminary"].status is TaskStatus.SKIPPED
     assert tasks["answer"].status is TaskStatus.FAILED
     assert store.answer(finished.id) is None
+
+
+def test_a_timed_out_branch_still_answers_from_the_other(
+    store, workspace, answerer, sample_video, monkeypatch
+):
+    def budget(action, duration_ms, runtime):
+        return 0.05 if action == "transcribe" else 300.0
+
+    monkeypatch.setattr(pipeline_module, "stage_budget", budget)
+    pipeline, _ = build(
+        store,
+        workspace,
+        answerer,
+        transcribe=_SlowSpeech(),
+        vision=_SceneWriter(store),
+    )
+
+    finished = pipeline.run(pipeline.submit(sample_video, "画面里在做什么"))
+
+    tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
+    assert tasks["transcribe"].status is TaskStatus.FAILED
+    assert "预算" in tasks["transcribe"].error
+    assert tasks["vision"].status is TaskStatus.SUCCEEDED
+    assert tasks["answer_preliminary"].status is TaskStatus.SUCCEEDED
+    assert tasks["answer"].status is TaskStatus.SUCCEEDED
+    answer = store.answer(finished.id)
+    assert answer is not None
+    assert answer.citations[0].kind == "scene"
 
 
 def test_a_running_job_can_be_cancelled(store, workspace, answerer, sample_video):

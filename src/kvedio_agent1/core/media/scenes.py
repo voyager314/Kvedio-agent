@@ -9,6 +9,7 @@ costs hundreds of seeks rather than a hundred thousand decodes.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,8 @@ def detect_scenes(
     min_ms: int = MIN_SCENE_MS,
     max_ms: int = MAX_SCENE_MS,
     threshold: float = THRESHOLD,
+    progress: Callable[[float], None] | None = None,
+    check: Callable[[], None] | None = None,
 ) -> list[DetectedScene]:
     """Split a video into scenes between ``min_ms`` and ``max_ms`` long.
 
@@ -48,17 +51,26 @@ def detect_scenes(
     A scene longer than ``max_ms`` is divided into equal parts. A fixed camera
     never cuts, yet what it points at changes — a lecture's slides, a dashboard's
     numbers — and one frame for ten minutes describes none of it.
+
+    ``progress`` receives a fraction of the sampling pass about a hundred times.
+    ``check`` is called once per sampled moment; it may raise to stop the pass,
+    which is how cancellation and a stage budget reach a long seek loop.
     """
     with av.open(str(path)) as container:
         stream = next((item for item in container.streams if item.type == "video"), None)
         if stream is None:
             raise ValueError(f"没有视频轨：{path.name}")
         duration_ms = _duration_ms(container)
+        samples = max(1, duration_ms // sample_ms)
+        stride = max(1, samples // 100)
         scenes: list[DetectedScene] = []
         previous: np.ndarray | None = None
         start = 0
         moment = 0
+        index = 0
         while moment < duration_ms:
+            if check is not None:
+                check()
             signature = _signature_at(container, stream, moment)
             if signature is not None:
                 if previous is not None:
@@ -68,6 +80,11 @@ def detect_scenes(
                         start = moment
                 previous = signature
             moment += sample_ms
+            index += 1
+            if progress is not None and index % stride == 0:
+                progress(min(1.0, moment / max(1, duration_ms)))
+        if progress is not None:
+            progress(1.0)
     if not scenes:
         return _split(0, max(duration_ms, 1), max_ms)
     if duration_ms - start < min_ms:

@@ -1,9 +1,11 @@
 import queue
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
+import kvedio_agent1.core.tasks.scheduler as scheduler_module
 from kvedio_agent1.core.domain import (
     DependencyMode,
     Event,
@@ -256,6 +258,46 @@ def test_independent_nodes_run_at_the_same_time(store, bus):
     )
 
     assert finished.status is JobStatus.SUCCEEDED
+
+
+def test_a_stage_that_exceeds_its_budget_fails(store, bus):
+    job = prepare(store, [NewTask(id="slow", agent="asr", action="transcribe")])
+
+    def slow(context):
+        end = time.monotonic() + 2
+        while time.monotonic() < end:
+            context.report(0.5)
+            time.sleep(0.01)
+
+    finished = Scheduler(store, bus).run(job, {"slow": slow}, budget=lambda task: 0.05)
+
+    task = store.tasks_for_job(job.id)[0]
+    assert finished.status is JobStatus.FAILED
+    assert task.status is TaskStatus.FAILED
+    assert "预算" in task.error
+
+
+def test_the_watchdog_names_a_stage_that_stopped_reporting(store, bus, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "WATCHDOG_SECONDS", 0.02)
+    job = prepare(store, [NewTask(id="stuck", agent="asr", action="transcribe")])
+    channel = bus.subscribe()
+
+    def stuck(context):
+        time.sleep(0.1)
+        context.check()
+
+    finished = Scheduler(store, bus).run(job, {"stuck": stuck}, budget=lambda task: 0.05)
+
+    task = store.tasks_for_job(job.id)[0]
+    assert finished.status is JobStatus.FAILED
+    assert task.status is TaskStatus.FAILED
+    assert "预算" in task.error
+    messages = [
+        str(event.payload.get("message"))
+        for event in drain(channel)
+        if event.kind is EventKind.LOG_LINE
+    ]
+    assert any("阶段超时" in message for message in messages)
 
 
 def test_progress_never_moves_backwards(store, bus):

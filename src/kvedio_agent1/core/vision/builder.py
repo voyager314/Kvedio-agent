@@ -22,6 +22,7 @@ from ..tasks import stop_if
 from ..workspace import Workspace
 
 MAX_SCENES = 80  # beyond this the descriptions cost more than they explain
+DETECT_SHARE = 0.2  # the sampling pass is the first fifth of the progress bar
 Report = Callable[[float, str | None], None]
 
 
@@ -86,6 +87,8 @@ class VisionBuilder:
                 min_ms=self._min_ms,
                 max_ms=self._max_ms,
                 threshold=self._threshold,
+                progress=lambda fraction: report(fraction * DETECT_SHARE, "识别场景"),
+                check=lambda: stop_if(cancelled),
             ),
             self._max_scenes,
         )
@@ -105,7 +108,7 @@ class VisionBuilder:
             if not frame.exists() and not grab_frame(
                 video.path, (scene.start_ms + scene.end_ms) // 2, frame
             ):
-                report((position + 1) / len(detected), f"场景 {position + 1}：取帧失败")
+                report(_described(position, len(detected)), f"场景 {position + 1}：取帧失败")
                 continue
             description = self._describe(scene, frame, segments)
             self._store.save_scene(
@@ -120,7 +123,7 @@ class VisionBuilder:
                 ),
             )
             described += 1
-            report((position + 1) / len(detected), f"场景 {position + 1}/{len(detected)}")
+            report(_described(position, len(detected)), f"场景 {position + 1}/{len(detected)}")
         self._store.save_scene_run(video.id, key, len(detected))
         return VisionStats(scenes=len(detected), described=described)
 
@@ -139,6 +142,11 @@ class VisionBuilder:
             segments=spoken,
         )
         return self._vision.describe(frame, prompt)
+
+
+def _described(position: int, total: int) -> float:
+    """Progress after describing one scene, leaving the sampling pass its share."""
+    return DETECT_SHARE + (1.0 - DETECT_SHARE) * (position + 1) / total
 
 
 def _merge(scenes: list[DetectedScene], limit: int) -> list[DetectedScene]:

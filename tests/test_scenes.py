@@ -49,6 +49,37 @@ def test_a_file_without_a_picture_track_is_reported(tmp_path):
     with pytest.raises(ValueError, match="视频轨"):
         detect_scenes(audio_only)
 
+def test_scene_detection_reports_progress_and_checks_between_samples(two_shot_video):
+    progress: list[float] = []
+    checks = 0
+
+    def check() -> None:
+        nonlocal checks
+        checks += 1
+
+    detect_scenes(
+        two_shot_video,
+        sample_ms=250,
+        min_ms=400,
+        progress=progress.append,
+        check=check,
+    )
+
+    assert progress[-1] == pytest.approx(1.0)
+    assert checks > 1
+
+
+def test_scene_detection_stops_when_the_check_raises(two_shot_video):
+    class Stop(Exception):
+        pass
+
+    def stop() -> None:
+        raise Stop()
+
+    with pytest.raises(Stop):
+        detect_scenes(two_shot_video, sample_ms=250, min_ms=400, check=stop)
+
+
 def test_a_still_camera_is_sampled_along_its_length(sample_video):
     scenes = detect_scenes(sample_video, sample_ms=250, min_ms=400, max_ms=300)
     assert len(scenes) == 4
