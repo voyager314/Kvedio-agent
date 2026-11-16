@@ -33,6 +33,9 @@ from ..domain import (
     TaskStatus,
     TimelineEvent,
     Transcript,
+    Usage,
+    UsageKind,
+    UsageTotal,
     VideoRecord,
 )
 from .errors import StorageError
@@ -735,6 +738,42 @@ class Storage:
                 " VALUES (?, ?, ?, ?)",
                 (video_id, cache_key, total, _instant(_now())),
             )
+
+    def record_usage(self, usage: Usage) -> None:
+        """Append one call's cost; nothing is aggregated here, so history stays queryable."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT INTO usage (kind, model, prompt_tokens, completion_tokens, seconds,"
+                " created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    usage.kind.value,
+                    usage.model,
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.seconds,
+                    _instant(_now()),
+                ),
+            )
+
+    def usage_totals(self) -> list[UsageTotal]:
+        """Every call ever made, summed by kind and model, largest first."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT kind, model, COUNT(*) AS calls, SUM(prompt_tokens) AS prompt,"
+                " SUM(completion_tokens) AS completion, SUM(seconds) AS seconds"
+                " FROM usage GROUP BY kind, model ORDER BY calls DESC, model"
+            ).fetchall()
+        return [
+            UsageTotal(
+                kind=UsageKind(row["kind"]),
+                model=row["model"],
+                calls=int(row["calls"]),
+                prompt_tokens=int(row["prompt"] or 0),
+                completion_tokens=int(row["completion"] or 0),
+                seconds=float(row["seconds"] or 0.0),
+            )
+            for row in rows
+        ]
 
     def abandon_interrupted(self) -> list[str]:
         """Fail every job an earlier process left running, together with its unfinished nodes.

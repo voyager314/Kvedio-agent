@@ -15,6 +15,7 @@ from .memory import Coverage
 from .scene import Scene
 from .timeline import TimelineEvent
 from .transcript import Chunk, Segment, Transcript, format_moment
+from .usage import Usage, UsageKind, UsageTotal
 from .video import FileIdentity, MediaInfo, VideoRecord
 
 __all__ = [
@@ -37,6 +38,9 @@ __all__ = [
     "TaskStatus",
     "TimelineEvent",
     "Transcript",
+    "Usage",
+    "UsageKind",
+    "UsageTotal",
     "VideoRecord",
     "format_moment",
 ]

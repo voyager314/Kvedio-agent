@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from ..domain import Chunk, Segment, VideoRecord
+from ..domain import Chunk, Segment, Usage, UsageKind, VideoRecord
 from ..storage import Storage
 from ..tasks import stop_if
 from ..workspace import Workspace
@@ -47,6 +47,7 @@ class AsrStage:
         address: str,
         chunk_ms: int,
         concurrency: int,
+        usage: Callable[[Usage], None] | None = None,
     ) -> None:
         self._store = store
         self._workspace = workspace
@@ -55,6 +56,7 @@ class AsrStage:
         self._address = address
         self._chunk_ms = chunk_ms
         self._concurrency = max(1, concurrency)
+        self._usage = usage
 
     def current(self, video: VideoRecord) -> bool:
         """Whether a finished transcript already exists under the key this stage would use."""
@@ -110,6 +112,14 @@ class AsrStage:
                             future.result(),
                         )
                         finished += 1
+                        if self._usage is not None:
+                            self._usage(
+                                Usage(
+                                    kind=UsageKind.TRANSCRIPTION,
+                                    model=self._model,
+                                    seconds=(chunk.end_ms - chunk.start_ms) / 1000,
+                                )
+                            )
                         report(finished / len(chunks), f"转录 {finished}/{len(chunks)} 段")
         self._store.finish_transcript(transcript.id)
         stored = self._store.transcript(video.id)

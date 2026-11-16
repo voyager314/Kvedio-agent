@@ -41,16 +41,19 @@ from .format import (
     format_duration,
     format_progress,
     format_size,
+    format_tokens,
     job_status_label,
     model_label,
     role_label,
     task_status_label,
+    usage_kind_label,
 )
 
 HELP = """\
 /help              显示本说明
 /model             列出各角色的模型与端点
 /cancel            取消正在跑的作业，并清空排队
+/usage             列出各模型累计调用的用量
 @路径 问题         引用视频并分析，路径含空格加引号
 直接输入问题       就当前视频追问，结论带时间戳
 /quit              退出"""
@@ -515,6 +518,8 @@ class Workbench(App[None]):
                 self._list_models(command.arguments)
             case "cancel":
                 self._cancel()
+            case "usage":
+                self._usage_report()
             case _:
                 self._say(f"未知命令 /{command.name}；/help 查看全部", style="yellow")
 
@@ -532,6 +537,30 @@ class Workbench(App[None]):
         if dropped:
             parts.append(f"清空排队 {dropped} 条")
         self._say("；".join(parts) + "。", style="yellow")
+
+    def _usage_report(self) -> None:
+        """Print what the model calls have cost so far, by kind and model."""
+        totals = self._store.usage_totals()
+        if not totals:
+            self._say("还没有模型调用。", style="dim")
+            return
+        lines = []
+        for item in totals:
+            spent = []
+            if item.prompt_tokens or item.completion_tokens:
+                spent.append(
+                    f"{format_tokens(item.prompt_tokens)} 输入 / "
+                    f"{format_tokens(item.completion_tokens)} 输出"
+                )
+            if item.seconds:
+                spent.append(f"{item.seconds / 60:.1f} 分钟音频")
+            if not spent:
+                spent.append("用量未上报")
+            lines.append(
+                f"{usage_kind_label(item.kind)} {item.model}：{item.calls} 次 · "
+                + " · ".join(spent)
+            )
+        self._say("\n".join(lines))
 
     def _list_models(self, arguments: tuple[str, ...]) -> None:
         """Show what each role calls; changing a model is an edit to the file, not a command."""

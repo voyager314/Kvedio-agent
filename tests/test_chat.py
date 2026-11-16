@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 
+from kvedio_agent1.core.domain import UsageKind
 from kvedio_agent1.core.llm import Chat, Message, ModelError
 
 URL = "https://chat.example.invalid/v1/chat/completions"
@@ -115,3 +116,13 @@ def test_the_repr_names_the_endpoint_and_model_only():
     chat = build(lambda request: answer("ok"))
     assert KEY not in repr(chat)
     assert URL in repr(chat)
+
+def test_each_reply_reports_its_usage():
+    seen = []
+
+    build(lambda request: answer("你好"), usage=seen.append).complete([Message("user", "hi")])
+
+    assert len(seen) == 1
+    assert seen[0].kind is UsageKind.CHAT
+    assert seen[0].model == "chat-model-0613"
+    assert (seen[0].prompt_tokens, seen[0].completion_tokens) == (12, 7)

@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from ..domain import Usage, UsageKind
 from . import retry
 from .reply import Reply, parse_reply
 
@@ -40,6 +41,7 @@ class Chat:
         temperature: float = 0.2,
         sleep: Callable[[float], None] = time.sleep,
         transport: httpx.BaseTransport | None = None,
+        usage: Callable[[Usage], None] | None = None,
     ) -> None:
         self._url = url
         self._api_key = api_key
@@ -49,6 +51,7 @@ class Chat:
         self._temperature = temperature
         self._sleep = sleep
         self._transport = transport
+        self._usage = usage
 
     def __repr__(self) -> str:
         return f"Chat(url={self._url!r}, model={self._model!r})"
@@ -65,7 +68,17 @@ class Chat:
             attempts=self._attempts,
             sleep=self._sleep,
         )
-        return parse_reply(response)
+        reply = parse_reply(response)
+        if self._usage is not None:
+            self._usage(
+                Usage(
+                    kind=UsageKind.CHAT,
+                    model=reply.model or self._model,
+                    prompt_tokens=reply.prompt_tokens,
+                    completion_tokens=reply.completion_tokens,
+                )
+            )
+        return reply
 
     def _post(self, messages: Sequence[Message], json_mode: bool) -> httpx.Response:
         payload: dict[str, Any] = {

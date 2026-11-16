@@ -13,6 +13,7 @@ from pathlib import Path
 
 import httpx
 
+from ..domain import Usage, UsageKind
 from . import retry
 from .reply import Reply, parse_reply
 
@@ -30,6 +31,7 @@ class Vision:
         attempts: int = 3,
         sleep: Callable[[float], None] = time.sleep,
         transport: httpx.BaseTransport | None = None,
+        usage: Callable[[Usage], None] | None = None,
     ) -> None:
         self._url = url
         self._api_key = api_key
@@ -38,6 +40,7 @@ class Vision:
         self._attempts = max(1, attempts)
         self._sleep = sleep
         self._transport = transport
+        self._usage = usage
 
     def __repr__(self) -> str:
         return f"Vision(url={self._url!r}, model={self._model!r})"
@@ -56,6 +59,15 @@ class Vision:
             sleep=self._sleep,
         )
         reply: Reply = parse_reply(response)
+        if self._usage is not None:
+            self._usage(
+                Usage(
+                    kind=UsageKind.VISION,
+                    model=reply.model or self._model,
+                    prompt_tokens=reply.prompt_tokens,
+                    completion_tokens=reply.completion_tokens,
+                )
+            )
         return " ".join(reply.text.split())
 
     def _post(self, encoded: str, prompt: str) -> httpx.Response:

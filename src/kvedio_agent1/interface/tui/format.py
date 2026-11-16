@@ -7,13 +7,20 @@ lives in one place and the panels stay free of formatting branches.
 from __future__ import annotations
 
 from ...core.config import ModelBinding, Role
-from ...core.domain import JobStatus, TaskStatus
+from ...core.domain import JobStatus, TaskStatus, UsageKind
 
 _ROLE_LABELS = {
     Role.SUPERVISOR: "监督",
     Role.ASR: "转录",
     Role.VIDEO: "视觉",
     Role.EMBEDDING: "嵌入",
+}
+
+_USAGE_LABELS = {
+    UsageKind.CHAT: "对话",
+    UsageKind.TRANSCRIPTION: "转录",
+    UsageKind.EMBEDDING: "嵌入",
+    UsageKind.VISION: "视觉",
 }
 
 _JOB_LABELS = {
@@ -96,3 +103,15 @@ def model_label(binding: ModelBinding | None, configured: bool) -> str:
     if binding is None:
         return "未配置"
     return binding.model if configured else f"{binding.model}(未配置)"
+
+def usage_kind_label(kind: UsageKind) -> str:
+    return _USAGE_LABELS[kind]
+
+
+def format_tokens(count: int) -> str:
+    """Token counts as a reader scans them: 840, 8.4k, 1.2M."""
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)

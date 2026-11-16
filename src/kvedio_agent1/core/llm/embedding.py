@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from ..domain import Usage, UsageKind
 from . import retry
 from .errors import ModelError
 
@@ -31,6 +32,7 @@ class Embedder:
         attempts: int = 3,
         sleep: Callable[[float], None] = time.sleep,
         transport: httpx.BaseTransport | None = None,
+        usage: Callable[[Usage], None] | None = None,
     ) -> None:
         self._url = url
         self._api_key = api_key
@@ -40,6 +42,7 @@ class Embedder:
         self._attempts = max(1, attempts)
         self._sleep = sleep
         self._transport = transport
+        self._usage = usage
 
     def __repr__(self) -> str:
         return f"Embedder(url={self._url!r}, model={self._model!r})"
@@ -54,6 +57,7 @@ class Embedder:
         if not texts:
             return []
         vectors: list[list[float]] = []
+        reported = 0
         for start in range(0, len(texts), self._batch_size):
             batch = list(texts[start : start + self._batch_size])
             response = retry.send(
@@ -61,7 +65,11 @@ class Embedder:
                 attempts=self._attempts,
                 sleep=self._sleep,
             )
-            vectors.extend(_vectors(response, len(batch)))
+            batch_vectors, prompt_tokens = _vectors(response, len(batch))
+            vectors.extend(batch_vectors)
+            reported += prompt_tokens
+        if self._usage is not None:
+            self._usage(Usage(kind=UsageKind.EMBEDDING, model=self._model, prompt_tokens=reported))
         return vectors
 
     def _post(self, batch: Sequence[str]) -> httpx.Response:
@@ -73,7 +81,7 @@ class Embedder:
             )
 
 
-def _vectors(response: httpx.Response, expected: int) -> list[list[float]]:
+def _vectors(response: httpx.Response, expected: int) -> tuple[list[list[float]], int]:
     try:
         payload: Any = response.json()
     except ValueError:
@@ -94,4 +102,6 @@ def _vectors(response: httpx.Response, expected: int) -> list[list[float]]:
         vectors.append([float(value) for value in embedding])
     if len({len(vector) for vector in vectors}) != 1:
         raise ModelError("嵌入向量的维度不一致")
-    return vectors
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    tokens = int(usage.get("prompt_tokens") or 0) if isinstance(usage, dict) else 0
+    return vectors, tokens

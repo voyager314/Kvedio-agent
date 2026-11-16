@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from kvedio_agent1.core.asr import AsrStage
-from kvedio_agent1.core.domain import Segment
+from kvedio_agent1.core.domain import Segment, UsageKind
 from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.core.tasks import Cancelled
 from kvedio_agent1.core.workspace import Workspace
@@ -48,7 +48,9 @@ def prepare(store: Storage, workspace: Workspace, wav: Path):
     return video
 
 
-def stage(store, workspace, transcribe, *, model="asr-model", chunk_ms=1_000, concurrency=1):
+def stage(
+    store, workspace, transcribe, *, model="asr-model", chunk_ms=1_000, concurrency=1, usage=None
+):
     return AsrStage(
         store,
         workspace,
@@ -57,6 +59,7 @@ def stage(store, workspace, transcribe, *, model="asr-model", chunk_ms=1_000, co
         address="https://asr.example.invalid/v1/audio/transcriptions",
         chunk_ms=chunk_ms,
         concurrency=concurrency,
+        usage=usage,
     )
 
 
@@ -138,3 +141,16 @@ def test_a_cancelled_run_writes_nothing(store, workspace, make_wav):
 
     assert transcriber.calls == []
     assert store.transcript(video.id) is None
+
+def test_every_chunk_reports_its_audio_seconds(store, workspace, make_wav):
+    video = prepare(store, workspace, make_wav(PATTERN))
+    seen = []
+
+    stage(store, workspace, FakeTranscriber(), usage=seen.append).run(
+        video, lambda fraction, message: None
+    )
+
+    assert len(seen) == 3
+    assert all(item.kind is UsageKind.TRANSCRIPTION for item in seen)
+    assert all(item.model == "asr-model" for item in seen)
+    assert sum(item.seconds for item in seen) > 2

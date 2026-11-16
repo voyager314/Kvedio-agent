@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 
+from kvedio_agent1.core.domain import UsageKind
 from kvedio_agent1.core.llm import Embedder, ModelError
 
 URL = "https://embed.example.invalid/v1/embeddings"
@@ -120,3 +121,20 @@ def test_the_key_never_appears_in_an_error_or_the_repr():
     with pytest.raises(ModelError) as failure:
         embedder.embed(["甲"])
     assert KEY not in str(failure.value)
+
+def test_an_embedding_call_reports_its_usage():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"index": 0, "embedding": [0.1, 0.2]}],
+                "usage": {"prompt_tokens": 9},
+            },
+        )
+
+    seen = []
+    build(handler, usage=seen.append).embed(["甲"])
+
+    assert len(seen) == 1
+    assert seen[0].kind is UsageKind.EMBEDDING
+    assert seen[0].prompt_tokens == 9

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from ..core.asr import AsrStage
 from ..core.config import (
@@ -23,6 +23,7 @@ from ..core.config import (
     load_or_create,
     resolved_api_key,
 )
+from ..core.domain import Usage
 from ..core.llm import Chat, Embedder, Transcriber, Vision
 from ..core.media import decoder_version
 from ..core.memory import MemoryBuilder
@@ -68,14 +69,14 @@ def _workbench() -> int:
         workspace = Workspace(
             loaded.config.runtime.workspace_dir or home_dir() / "workspace"
         )
-        chat = _chat(loaded.config)
-        embedder = _embedder(loaded.config)
+        chat = _chat(loaded.config, store.record_usage)
+        embedder = _embedder(loaded.config, store.record_usage)
         stages = Stages(
             runtime=loaded.config.runtime,
             workspace=workspace,
-            asr=_asr_stage(loaded.config, store, workspace),
+            asr=_asr_stage(loaded.config, store, workspace, store.record_usage),
             memory=_memory_stage(loaded.config, store, chat, embedder),
-            vision=_vision_stage(loaded.config, store, workspace),
+            vision=_vision_stage(loaded.config, store, workspace, store.record_usage),
             events=_events_stage(loaded.config, store, chat),
             answering=_answering_stage(loaded.config, store, bus, chat, embedder),
         )
@@ -85,7 +86,9 @@ def _workbench() -> int:
     return 0
 
 
-def _chat(config: AppConfig) -> Chat | None:
+def _chat(
+    config: AppConfig, usage: Callable[[Usage], None] | None = None
+) -> Chat | None:
     """The conversation client, or ``None`` when the role has no model or no usable key."""
     binding = config.supervisor
     key = resolved_api_key(binding) if binding is not None else None
@@ -96,10 +99,13 @@ def _chat(config: AppConfig) -> Chat | None:
         api_key=key,
         model=binding.model,
         timeout=config.runtime.request_timeout_seconds,
+        usage=usage,
     )
 
 
-def _embedder(config: AppConfig) -> Embedder | None:
+def _embedder(
+    config: AppConfig, usage: Callable[[Usage], None] | None = None
+) -> Embedder | None:
     """The embedding client, or ``None``; without it retrieval stays keyword-only."""
     binding = config.embedding
     key = resolved_api_key(binding) if binding is not None else None
@@ -110,6 +116,7 @@ def _embedder(config: AppConfig) -> Embedder | None:
         api_key=key,
         model=binding.model,
         timeout=config.runtime.request_timeout_seconds,
+        usage=usage,
     )
 
 
@@ -130,7 +137,10 @@ def _memory_stage(
 
 
 def _vision_stage(
-    config: AppConfig, store: Storage, workspace: Workspace
+    config: AppConfig,
+    store: Storage,
+    workspace: Workspace,
+    usage: Callable[[Usage], None] | None = None,
 ) -> VisionBuilder | None:
     """The scene describer, or ``None`` when no vision model can call out."""
     binding = config.video
@@ -144,6 +154,7 @@ def _vision_stage(
             api_key=key,
             model=binding.model,
             timeout=config.runtime.request_timeout_seconds,
+            usage=usage,
         ),
         workspace,
         max_ms=config.runtime.scene_max_seconds * 1000,
@@ -176,7 +187,12 @@ def _answering_stage(
     return Answering(store, bus, chat, config.supervisor.model, embedder)
 
 
-def _asr_stage(config: AppConfig, store: Storage, workspace: Workspace) -> AsrStage | None:
+def _asr_stage(
+    config: AppConfig,
+    store: Storage,
+    workspace: Workspace,
+    usage: Callable[[Usage], None] | None = None,
+) -> AsrStage | None:
     """Build the transcription stage from the configured role.
 
     Returns ``None`` when the role has no model or no usable key: the job then
@@ -201,6 +217,7 @@ def _asr_stage(config: AppConfig, store: Storage, workspace: Workspace) -> AsrSt
         address=binding.url,
         chunk_ms=config.runtime.asr_chunk_seconds * 1000,
         concurrency=config.runtime.asr_concurrency,
+        usage=usage,
     )
 
 

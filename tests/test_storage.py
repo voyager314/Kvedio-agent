@@ -17,6 +17,8 @@ from kvedio_agent1.core.domain import (
     Scene,
     Segment,
     TaskStatus,
+    Usage,
+    UsageKind,
 )
 from kvedio_agent1.core.storage import Storage, StorageError
 from kvedio_agent1.core.storage.schema import SCHEMA_VERSION
@@ -420,3 +422,17 @@ def test_a_citation_remembers_what_it_rests_on(store, tmp_path):
     assert stored.citations[0].kind == "scene"
     assert stored.citations[0].quote == "白板上写着预算"
     assert store.answer(job.id).citations[0].kind == "scene"
+
+def test_usage_is_summed_by_kind_and_model(store):
+    store.record_usage(Usage(UsageKind.CHAT, "chat-model", 100, 20))
+    store.record_usage(Usage(UsageKind.CHAT, "chat-model", 50, 10))
+    store.record_usage(Usage(UsageKind.TRANSCRIPTION, "asr-model", seconds=12.5))
+
+    totals = {(item.kind, item.model): item for item in store.usage_totals()}
+
+    chat = totals[(UsageKind.CHAT, "chat-model")]
+    assert chat.calls == 2
+    assert (chat.prompt_tokens, chat.completion_tokens) == (150, 30)
+    audio = totals[(UsageKind.TRANSCRIPTION, "asr-model")]
+    assert audio.calls == 1
+    assert audio.seconds == 12.5
