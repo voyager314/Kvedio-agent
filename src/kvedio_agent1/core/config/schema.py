@@ -3,8 +3,8 @@
 Fixes the vocabulary of ``config.yml`` as types and rejects unknown fields or
 out-of-range values at load time.
 
-Does not touch the filesystem, resolve ``env:`` references, or persist program
-state; those depend on the machine and belong to the loader.
+Does not touch the filesystem or resolve ``env:`` references; those depend on the
+machine and belong to the loader.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Role(StrEnum):
@@ -24,9 +24,12 @@ class Role(StrEnum):
 
 
 class ModelBinding(BaseModel):
-    """One selectable model for one role.
+    """The one model behind one role.
 
-    ``name`` is the handle a user switches between, unique within its role.
+    ``url`` is the complete request address and is used exactly as written. Sending
+    paths differ between providers, so nothing is appended to it and no trailing
+    slash is removed: a half address succeeds only up to the first call.
+
     ``api_key`` never leaves the object: it is excluded from serialization and
     from the repr, so a bound key cannot reach a log line, an error message or a
     rendered panel. Reporting uses ``env_var`` and ``has_key`` instead.
@@ -34,10 +37,17 @@ class ModelBinding(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    name: str = Field(min_length=1)
     model: str = Field(min_length=1)
-    api_base: str = Field(min_length=1)
+    url: str = Field(min_length=1)
     api_key: str = Field(default="", exclude=True, repr=False)
+
+    @field_validator("url")
+    @classmethod
+    def _complete_address(cls, value: str) -> str:
+        """Refuse a bare host, which would read as configured until the first request fails."""
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("必须是以 http:// 或 https:// 开头的完整 URL")
+        return value
 
     @property
     def env_var(self) -> str | None:
@@ -56,34 +66,6 @@ class ModelBinding(BaseModel):
         return bool(self.api_key)
 
 
-class RoleBindings(BaseModel):
-    """Every binding declared per role.
-
-    A role with no binding is unconfigured rather than invalid: a freshly created
-    template legitimately leaves slots empty until the user fills them in.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    supervisor: tuple[ModelBinding, ...] = ()
-    asr: tuple[ModelBinding, ...] = ()
-    video: tuple[ModelBinding, ...] = ()
-
-    def for_role(self, role: Role) -> tuple[ModelBinding, ...]:
-        return getattr(self, role.value)
-
-    @model_validator(mode="after")
-    def _names_unique(self) -> RoleBindings:
-        for role in Role:
-            names = [binding.name for binding in self.for_role(role)]
-            repeated = sorted({name for name in names if names.count(name) > 1})
-            if repeated:
-                raise ValueError(
-                    f"role {role.value} declares the binding name twice: {', '.join(repeated)}"
-                )
-        return self
-
-
 class RuntimeLimits(BaseModel):
     """Resource ceilings the pipeline honours, independent of any model choice."""
 
@@ -97,10 +79,19 @@ class RuntimeLimits(BaseModel):
 
 
 class AppConfig(BaseModel):
-    """The whole file: declared bindings, a default selection, and resource limits."""
+    """The whole file: one model per role, plus the resource limits.
+
+    A role left out is unconfigured rather than invalid: a freshly created
+    template legitimately carries a slot whose key is not filled in yet.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    roles: RoleBindings = RoleBindings()
-    active: dict[Role, str] = {}
+    supervisor: ModelBinding | None = None
+    asr: ModelBinding | None = None
+    video: ModelBinding | None = None
     runtime: RuntimeLimits = RuntimeLimits()
+
+    def for_role(self, role: Role) -> ModelBinding | None:
+        """The model configured for ``role``; ``None`` when the role was left out."""
+        return getattr(self, role.value)

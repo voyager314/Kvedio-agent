@@ -40,7 +40,6 @@
 - `video.registered` — 一条视频被引用并完成探测
 - `job.queued` `job.started` `job.succeeded` `job.partial` `job.failed` `job.canceled`
 - `task.ready` `task.started` `task.progress` `task.succeeded` `task.failed` `task.canceled` `task.skipped`
-- `models.changed` — 某个角色的当前绑定被切换
 - `log.line` — 面向用户的一行说明，不是调试日志
 
 调试日志走标准库 `logging`，与事件流分离：日志可以丢弃，事件不能。
@@ -205,32 +204,23 @@ pending ──► ready ──► running ──► succeeded
 
 ### 7.1 位置与创建
 
-用户配置固定在 `~/.kvedio_agent/config.yml`，程序只读。首次运行时若文件不存在，按随包模板创建并在界面提示路径与"需要填写密钥"。程序自身的状态（当前选中的模型绑定等）写 `~/.kvedio_agent/state.yml`，与用户配置分离——写回用户文件会丢掉注释与排版。
+用户配置固定在 `~/.kvedio_agent/config.yml`，程序只读，也不另存一份选择：每个角色只有一个模型，更换模型是编辑这个文件并重启，程序不回写用户文件（回写会丢掉注释与排版）。首次运行时若文件不存在，按随包模板创建并在界面提示路径与"需要填写密钥"。
 
 ### 7.2 结构
 
 ```yaml
-active:                        # 每个角色当前使用的绑定名
-  supervisor: deepseek
-  asr: dashscope
-  video: dashscope
-
-roles:
-  supervisor:
-    - name: deepseek
-      model: deepseek-chat
-      api_base: https://api.deepseek.com/v1
-      api_key: env:DEEPSEEK_API_KEY
-  asr:
-    - name: dashscope
-      model: qwen3-asr-flash
-      api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
-      api_key: env:DASHSCOPE_API_KEY
-  video:
-    - name: dashscope
-      model: qwen-vl-max
-      api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
-      api_key: env:DASHSCOPE_API_KEY
+supervisor:
+  model: deepseek-chat
+  url: https://api.deepseek.com/v1/chat/completions
+  api_key: env:DEEPSEEK_API_KEY
+asr:
+  model: qwen3-asr-flash
+  url: https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions
+  api_key: env:DASHSCOPE_API_KEY
+video:
+  model: qwen-vl-max
+  url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+  api_key: env:DASHSCOPE_API_KEY
 
 runtime:
   max_video_duration_seconds: 7200
@@ -240,15 +230,19 @@ runtime:
   workspace_dir: null          # null 表示 ~/.kvedio_agent/workspace
 ```
 
-三类角色共用一种绑定形状：`name` 在角色内唯一；`api_key` 允许为空，表示尚未填写，此时绑定"不可用"而不是"非法"——模板刚生成时必然如此。`env:NAME` 形式的引用在使用时才解析，配置展示时原样显示引用名。
+三类角色共用一种形状：`model`、`url`、`api_key`。
+
+`url` 是**完整地址**，调用时原样使用：不拼接路径、不改写末尾斜杠、不补版本段。供应商的路径各不相同（阿里云的兼容路径是 `/compatible-mode/v1/...`，有的供应商把版本放在别处），由用户照文档填写；缺少 `http(s)://` 在载入时就拒绝，因为半截地址要到第一次请求才暴露。
+
+`api_key` 允许为空，表示尚未填写，此时该角色"不可用"而不是配置非法——模板刚生成时必然如此。`env:NAME` 形式的引用在使用时才解析，配置展示时只显示引用名。
 
 ### 7.3 脱敏
 
-展示层拿到的配置对象只有 `configured: bool`，没有密钥字符串。脱敏不靠"打印时打码"，而是让密钥从不出现在可被打印的对象里：绑定对象把密钥存在私有字段，`repr` 与序列化都不包含它。
+展示层拿到的配置对象只有"是否可用"，没有密钥字符串。脱敏不靠"打印时打码"，而是让密钥从不出现在可被打印的对象里：密钥字段不参与 `repr` 与序列化，展示时只报模型名、地址与环境变量名。
 
-### 7.4 角色绑定的切换
+### 7.4 更换模型
 
-界面命令 `/model` 列出三个角色的全部绑定与可用状态，选择后写入 `state.yml` 的 `active`，发 `models.changed` 事件。绑定名在配置里消失时，回退到该角色第一个可用绑定，并在界面说明回退原因。
+编辑 `config.yml` 里对应角色的 `model` 与 `url`，重启工作台。界面命令 `/model` 只列出三个角色当前使用的模型、完整端点与密钥来源，不提供切换，也不写任何文件。
 
 ## 8. 视频身份、指纹与检查点
 
@@ -280,9 +274,9 @@ runtime:
 | 时间轴 | 时长刻度与区间标记（M1 起填充转录与场景） | 显示已知时长 |
 | 证据 | 当前结论引用的时间戳、文本、关键帧路径 | 显示"暂无证据" |
 
-状态栏常驻：数据库文件名、三个角色的绑定名与可用状态、运行中任务数。
+状态栏常驻：数据库文件名、三个角色使用的模型与可用状态、运行中任务数。
 
-输入语法：`@<相对路径> <问题>` 引用视频并起作业；`/model` 切换绑定；`/help` 列出语法；`/quit` 退出。路径解析以进程工作目录为基准，解析失败在对话区报错并保留原文，不清空输入。
+输入语法：`@<相对路径> <问题>` 引用视频并起作业；`/model` 列出模型与端点；`/help` 列出语法；`/quit` 退出。路径解析以进程工作目录为基准，解析失败在对话区报错并保留原文，不清空输入。
 
 ## 11. 里程碑
 
@@ -292,7 +286,7 @@ runtime:
 - 引用本地 mp4：指纹、探测、入库，重复引用不产生第二条记录。
 - 作业与任务图落库并调度，状态迁移由状态机校验。
 - 工作台四区渲染，任务面板随事件实时更新。
-- 首次运行生成配置模板；`/model` 查看与切换绑定并写回状态文件。
+- 首次运行生成配置模板；`/model` 列出三个角色使用的模型与完整端点。
 - 启动时把上次残留的 `running` 作业连同未完成节点判为失败，并写明原因。
 
 验收：一条真实 mp4 被引用后，时长、分辨率、音轨在界面可见；改动文件后再次引用产生新记录并在对话区说明；非法迁移、坏配置、密钥泄漏各有测试；`uv run pytest` 与 `ruff check` 通过。

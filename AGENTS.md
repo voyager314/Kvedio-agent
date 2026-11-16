@@ -52,8 +52,8 @@ are structural constraints, not tuning knobs:
   transcript whole is a defect, not a shortcut.
 - **Secrets.** Keys and tokens never reach a log line, an error message, a
   traceback, or a build artifact. The driver ships no provider, key, or default
-  model: connections, role bindings, and permission to switch them come from
-  `~/.kvedio_agent/config.yml`.
+  model: each role's model and its complete request address come from
+  `~/.kvedio_agent/config.yml`, and nothing is appended to that address.
 
 
 ## Where the rules live

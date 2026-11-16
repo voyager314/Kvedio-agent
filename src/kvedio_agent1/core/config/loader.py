@@ -2,17 +2,15 @@
 
 Locates the configuration directory, creates the first configuration from the
 packaged template, turns parse and validation failures into messages that carry
-field paths but never field values, resolves ``env:`` key references, and reads
-or writes the program's own selections next to the user's file.
+field paths but never field values, and resolves ``env:`` key references.
 
-Does not cache the parsed configuration and does not write the user's file: it
+Does not cache the parsed configuration and never writes the user's file: it
 belongs to the user, and rewriting it destroys comments and layout.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -20,11 +18,10 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from .schema import AppConfig, ModelBinding, Role
+from .schema import AppConfig, ModelBinding
 
 HOME_ENV = "KVEDIO_AGENT_HOME"
 CONFIG_FILENAME = "config.yml"
-STATE_FILENAME = "state.yml"
 DATABASE_FILENAME = "kvedio.db"
 TEMPLATE = "default/config.example.yml"
 
@@ -46,25 +43,8 @@ class Loaded:
     created: bool
 
 
-@dataclass(frozen=True)
-class Selection:
-    """The binding a role runs on, and the request that could not be honoured.
-
-    ``requested`` is the binding name asked for by the state file or the config
-    default when no such binding exists; ``None`` means no request was overridden.
-    """
-
-    role: Role
-    binding: ModelBinding | None
-    requested: str | None
-
-    @property
-    def fell_back(self) -> bool:
-        return self.requested is not None
-
-
 def home_dir() -> Path:
-    """Directory holding the configuration, the state file and the database.
+    """Directory holding the configuration and the database.
 
     ``KVEDIO_AGENT_HOME`` overrides it so a test or a second instance can run
     without touching the user's own directory.
@@ -75,10 +55,6 @@ def home_dir() -> Path:
 
 def config_path() -> Path:
     return home_dir() / CONFIG_FILENAME
-
-
-def state_path() -> Path:
-    return home_dir() / STATE_FILENAME
 
 
 def database_path() -> Path:
@@ -146,56 +122,9 @@ def resolved_api_key(binding: ModelBinding) -> str | None:
     return binding.api_key or None
 
 
-def select(config: AppConfig, role: Role, state: Mapping[Role, str]) -> Selection:
-    """Pick the binding a role runs on.
-
-    Precedence is the program state file, then the file's own ``active`` entry,
-    then the first declared binding. A requested name that is not declared falls
-    back to the first binding and reports the name in ``Selection.requested``.
-    """
-    bindings = config.roles.for_role(role)
-    requested = state.get(role) or config.active.get(role)
-    if requested is not None:
-        for binding in bindings:
-            if binding.name == requested:
-                return Selection(role=role, binding=binding, requested=None)
-        return Selection(role=role, binding=bindings[0] if bindings else None, requested=requested)
-    return Selection(role=role, binding=bindings[0] if bindings else None, requested=None)
-
-
-def read_active(path: Path | None = None) -> dict[Role, str]:
-    """Selections the program persisted; a missing or damaged file yields no selections."""
-    target = path or state_path()
-    try:
-        raw = yaml.safe_load(target.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    active = raw.get("active")
-    if not isinstance(active, dict):
-        return {}
-    selections: dict[Role, str] = {}
-    for name, value in active.items():
-        if not isinstance(value, str) or not value:
-            continue
-        try:
-            selections[Role(name)] = value
-        except ValueError:
-            continue
-    return selections
-
-
-def write_active(role: Role, name: str, path: Path | None = None) -> None:
-    """Persist one role's selection, leaving every other role's entry untouched."""
-    target = path or state_path()
-    selections = read_active(target)
-    selections[role] = name
-    target.parent.mkdir(parents=True, exist_ok=True)
-    ordered = {member.value: selections[member] for member in Role if member in selections}
-    target.write_text(
-        yaml.safe_dump({"active": ordered}, allow_unicode=True, sort_keys=True), encoding="utf-8"
-    )
+def is_usable(binding: ModelBinding | None) -> bool:
+    """Whether a role can call out: a binding exists and its key is available right now."""
+    return binding is not None and resolved_api_key(binding) is not None
 
 
 def _describe(exc: ValidationError) -> str:

@@ -5,16 +5,15 @@ import yaml
 from kvedio_agent1 import main
 
 BINDING = {
-    "name": "primary",
     "model": "some-model",
-    "api_base": "https://example.invalid/v1",
+    "url": "https://example.invalid/v1/chat/completions",
     "api_key": "",
 }
 
 
 def write_config(home: Path, binding: dict) -> None:
     home.mkdir(parents=True, exist_ok=True)
-    payload = {"roles": {"supervisor": [binding], "asr": [], "video": []}}
+    payload = {"supervisor": binding}
     (home / "config.yml").write_text(yaml.safe_dump(payload, allow_unicode=True), encoding="utf-8")
 
 

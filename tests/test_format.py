@@ -1,25 +1,24 @@
 import pytest
 
-from kvedio_agent1.core.config import ModelBinding, Role, Selection
+from kvedio_agent1.core.config import ModelBinding, Role
 from kvedio_agent1.core.domain import JobStatus, TaskStatus
 from kvedio_agent1.interface.tui.format import (
     agent_label,
-    binding_label,
     format_container,
     format_duration,
     format_progress,
     format_size,
     job_status_label,
+    model_label,
     role_label,
     task_status_label,
 )
 
 
-def selection(name: str = "primary", key: str = "sk-live-zzz") -> Selection:
-    binding = ModelBinding(
-        name=name, model="some-model", api_base="https://example.invalid/v1", api_key=key
+def binding(model: str = "some-model", key: str = "sk-live-zzz") -> ModelBinding:
+    return ModelBinding(
+        model=model, url="https://example.invalid/v1/chat/completions", api_key=key
     )
-    return Selection(role=Role.ASR, binding=binding, requested=None)
 
 
 @pytest.mark.parametrize(
@@ -47,20 +46,19 @@ def test_a_container_reads_as_its_demuxer_family():
     assert format_container(None) == "未知"
 
 
-def test_a_configured_binding_shows_only_its_name():
-    label = binding_label(selection(), configured=True)
-    assert label == "primary"
+def test_a_usable_model_shows_its_name_only():
+    label = model_label(binding(), configured=True)
+    assert label == "some-model"
     assert "sk-live" not in label
     assert "zzz" not in label
 
 
-def test_an_unconfigured_binding_says_so():
-    assert binding_label(selection(), configured=False) == "primary(未配置)"
+def test_an_unusable_model_says_so():
+    assert model_label(binding(), configured=False) == "some-model(未配置)"
 
 
-def test_a_role_without_a_binding_says_so():
-    empty = Selection(role=Role.VIDEO, binding=None, requested=None)
-    assert binding_label(empty, configured=False) == "未绑定"
+def test_a_role_without_a_model_says_so():
+    assert model_label(None, configured=False) == "未配置"
 
 
 def test_labels_are_words_not_enum_values():

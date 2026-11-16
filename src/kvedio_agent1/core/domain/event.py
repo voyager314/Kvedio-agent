@@ -25,7 +25,6 @@ class EventKind(StrEnum):
     TASK_FAILED = "task.failed"
     TASK_CANCELED = "task.canceled"
     TASK_SKIPPED = "task.skipped"
-    MODELS_CHANGED = "models.changed"
     LOG_LINE = "log.line"
 
 

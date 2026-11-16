@@ -19,14 +19,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Header, Input, RichLog, Static
 
-from ...core.config import (
-    Loaded,
-    Role,
-    read_active,
-    resolved_api_key,
-    select,
-    write_active,
-)
+from ...core.config import Loaded, Role, is_usable
 from ...core.domain import Event, EventKind, JobRecord, JobStatus, TaskRecord, VideoRecord
 from ...core.pipeline import Pipeline
 from ...core.storage import Storage
@@ -34,20 +27,19 @@ from ...core.tasks import EventBus
 from ..submission import USAGE, Command, Reference, parse_submission
 from .format import (
     agent_label,
-    binding_label,
     format_container,
     format_duration,
     format_progress,
     format_size,
     job_status_label,
+    model_label,
     role_label,
     task_status_label,
 )
 
 HELP = """\
 /help              显示本说明
-/model             列出各角色的绑定与状态
-/model 角色 绑定名  切换绑定并记住选择
+/model             列出各角色的模型与端点
 @路径 问题         引用视频并分析，路径含空格加引号
 /quit              退出"""
 
@@ -136,7 +128,6 @@ class Workbench(App[None]):
         self._pipeline = pipeline
         self._bus = bus
         self._events = bus.subscribe()
-        self._state = read_active()
         self._watched: str | None = None
         self._task_rows: set[str] = set()
         self._latest: JobRecord | None = None
@@ -146,7 +137,7 @@ class Workbench(App[None]):
         yield Header(show_clock=True)
         with Horizontal(id="body"):
             with Vertical(id="chat-column"):
-                yield RichLog(id="chat", markup=False, wrap=True)
+                yield RichLog(id="chat", markup=False, wrap=True, min_width=0)
                 yield Input(id="prompt", placeholder="@路径 问题　或　/help")
             with Vertical(id="side-column"):
                 yield DataTable(id="tasks", zebra_stripes=True)
@@ -166,7 +157,7 @@ class Workbench(App[None]):
         if self._created_config:
             self._say("已按模板创建配置：填入密钥或其环境变量引用后即可调用模型。", style="yellow")
         self._say(HELP, style="dim")
-        self._report_missing_bindings()
+        self._report_configuration()
         self._reload()
         self._render_status()
         self.set_interval(0.12, self._pump)
@@ -217,9 +208,6 @@ class Workbench(App[None]):
             message = event.payload.get("message")
             if message:
                 self._say(str(message))
-            return
-        if kind is EventKind.MODELS_CHANGED:
-            self._render_status()
             return
         if event.job_id is None:
             return
@@ -349,11 +337,8 @@ class Workbench(App[None]):
     def _render_status(self) -> None:
         parts = [f"库 {self._store.path.name}"]
         for role in Role:
-            selection = select(self._config, role, self._state)
-            configured = (
-                selection.binding is not None and resolved_api_key(selection.binding) is not None
-            )
-            parts.append(f"{role_label(role)} {binding_label(selection, configured)}")
+            binding = self._config.for_role(role)
+            parts.append(f"{role_label(role)} {model_label(binding, is_usable(binding))}")
         parts.append(f"运行中 {len(self._running_jobs)}")
         self.query_one("#status", Static).update(" │ ".join(parts))
 
@@ -362,16 +347,20 @@ class Workbench(App[None]):
             return None
         return self._store.video(self._latest.video_id)
 
-    def _report_missing_bindings(self) -> None:
-        for role in Role:
-            selection = select(self._config, role, self._state)
-            if not selection.fell_back:
-                continue
-            target = selection.binding.name if selection.binding is not None else "无"
+    def _report_configuration(self) -> None:
+        """Say once which roles cannot call out, rather than leaving a silent status bar."""
+        missing = [role_label(role) for role in Role if self._config.for_role(role) is None]
+        if missing:
             self._say(
-                f"{role_label(role)} 的绑定 {selection.requested} 不在配置里，已回退到 {target}",
+                f"配置缺少角色模型：{'、'.join(missing)}；编辑 {self._config_path} 补齐",
                 style="yellow",
             )
+        for role in Role:
+            binding = self._config.for_role(role)
+            if binding is None or is_usable(binding):
+                continue
+            reason = f"环境变量 {binding.env_var} 未设置" if binding.env_var else "未填写密钥"
+            self._say(f"{role_label(role)}未配置密钥：{reason}", style="yellow")
 
     def _command(self, command: Command) -> None:
         match command.name:
@@ -380,55 +369,38 @@ class Workbench(App[None]):
             case "help":
                 self._say(HELP)
             case "model":
-                self._switch_model(command.arguments)
+                self._list_models(command.arguments)
             case _:
                 self._say(f"未知命令 /{command.name}；/help 查看全部", style="yellow")
 
-    def _switch_model(self, arguments: tuple[str, ...]) -> None:
-        """List the bindings, or move one role onto a named binding and remember the choice."""
-        if not arguments:
-            self._say("\n".join(self._binding_lines()))
+    def _list_models(self, arguments: tuple[str, ...]) -> None:
+        """Show what each role calls; changing a model is an edit to the file, not a command."""
+        if arguments:
+            self._say(f"更换模型：编辑 {self._config_path} 后重启工作台", style="yellow")
             return
-        if len(arguments) != 2:
-            self._say("用法：/model 或 /model <角色> <绑定名>", style="yellow")
-            return
-        role_name, name = arguments
-        try:
-            role = Role(role_name)
-        except ValueError:
-            allowed = ", ".join(member.value for member in Role)
-            self._say(f"未知角色 {role_name}；可选 {allowed}", style="yellow")
-            return
-        declared = {binding.name for binding in self._config.roles.for_role(role)}
-        if name not in declared:
-            available = ", ".join(sorted(declared)) or "无"
-            self._say(f"{role_label(role)} 没有绑定 {name}；可用 {available}", style="yellow")
-            return
-        write_active(role, name)
-        self._state = read_active()
-        self._bus.publish(
-            Event.stamp(EventKind.MODELS_CHANGED, payload={"role": role.value, "name": name})
-        )
-        self._say(f"{role_label(role)} 切换到 {name}")
+        self._say("\n".join(self._model_lines()))
 
-    def _binding_lines(self) -> list[str]:
+    def _model_lines(self) -> list[str]:
         lines: list[str] = []
         for role in Role:
-            selection = select(self._config, role, self._state)
-            configured = (
-                selection.binding is not None and resolved_api_key(selection.binding) is not None
-            )
-            lines.append(
-                f"{role_label(role)}（{role.value}）当前 {binding_label(selection, configured)}"
-            )
-            bindings = self._config.roles.for_role(role)
-            if not bindings:
-                lines.append("  未声明任何绑定")
-            for binding in bindings:
-                usable = "已配置" if resolved_api_key(binding) is not None else "未配置"
-                lines.append(f"  {binding.name}　{binding.model}　{binding.api_base}　{usable}")
+            binding = self._config.for_role(role)
+            if binding is None:
+                lines.append(f"{role_label(role)}（{role.value}）未配置")
+                continue
+            usable = "已配置" if is_usable(binding) else "未配置"
+            lines.append(f"{role_label(role)}（{role.value}）{usable}")
+            lines.append(f"  模型　{binding.model}")
+            lines.append(f"  地址　{binding.url}")
+            if binding.env_var is not None:
+                lines.append(f"  密钥　环境变量 {binding.env_var}")
         return lines
 
     def _say(self, message: str, *, style: str = "") -> None:
-        """Write one line to the chat panel; the text is never parsed as markup."""
-        self.query_one("#chat", RichLog).write(Text(message, style=style or None))
+        """Write one line to the chat panel; the text is never parsed as markup.
+
+        Long unbroken runs — a path, a URL — fold rather than crop: a truncated
+        endpoint reads as a different endpoint.
+        """
+        self.query_one("#chat", RichLog).write(
+            Text(message, style=style or None, overflow="fold")
+        )

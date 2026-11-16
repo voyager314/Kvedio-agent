@@ -13,7 +13,7 @@ uv run kvedio-agent1 config     # 配置位置与当前绑定，不显示密钥
 uv run kvedio-agent1 doctor     # 检查配置、数据库与解码器
 ```
 
-首次运行会在 `~/.kvedio_agent/config.yml` 生成模板，并创建 `~/.kvedio_agent/kvedio.db`。模板里三类角色（`supervisor`、`asr`、`video`）都按 OpenAI 兼容协议接入，`api_key` 推荐写成 `env:变量名`，让密钥留在配置文件之外。
+首次运行会在 `~/.kvedio_agent/config.yml` 生成模板，并创建 `~/.kvedio_agent/kvedio.db`。模板里每个角色（`supervisor`、`asr`、`video`）对应一个模型：`url` 是完整请求地址，程序原样使用、不拼接路径；`api_key` 推荐写成 `env:变量名`，让密钥留在配置文件之外。更换模型改这个文件，重启生效。
 
 不需要系统安装 ffmpeg：解码器随 `av` 一起安装。
 
@@ -21,13 +21,12 @@ uv run kvedio-agent1 doctor     # 检查配置、数据库与解码器
 
 ```
 @videos/weekly.mp4 这场会议讨论了什么   引用视频并起一个作业；路径含空格时加引号
-/model                                  列出各角色的绑定与可用状态
-/model asr dashscope                    切换某个角色使用的绑定，选择写入 state.yml
+/model                                  列出各角色的模型与完整端点
 /help                                   语法
 /quit                                   退出
 ```
 
-四区一栏：对话、任务、时间轴、证据；底部状态栏显示数据库、三个角色的绑定与运行中任务数。
+四区一栏：对话、任务、时间轴、证据；底部状态栏显示数据库、三个角色使用的模型与运行中任务数。
 
 ## 目录
 

@@ -6,7 +6,7 @@ lives in one place and the panels stay free of formatting branches.
 
 from __future__ import annotations
 
-from ...core.config import Role, Selection
+from ...core.config import ModelBinding, Role
 from ...core.domain import JobStatus, TaskStatus
 
 _ROLE_LABELS = {Role.SUPERVISOR: "监督", Role.ASR: "转录", Role.VIDEO: "视觉"}
@@ -82,12 +82,12 @@ def agent_label(agent: str) -> str:
     return _AGENT_LABELS.get(agent, agent)
 
 
-def binding_label(selection: Selection, configured: bool) -> str:
-    """Name of a role's active binding and whether it can call out.
+def model_label(binding: ModelBinding | None, configured: bool) -> str:
+    """The model behind a role and whether it can call out.
 
-    Reports only the binding name and a state word: no part of a key, and not the
-    environment variable that may hold one.
+    Names the model only: no part of a key, and not the environment variable that
+    may hold one.
     """
-    if selection.binding is None:
-        return "未绑定"
-    return selection.binding.name if configured else f"{selection.binding.name}(未配置)"
+    if binding is None:
+        return "未配置"
+    return binding.model if configured else f"{binding.model}(未配置)"

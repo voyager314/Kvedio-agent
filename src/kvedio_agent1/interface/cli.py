@@ -16,17 +16,15 @@ from ..core.config import (
     ConfigError,
     Role,
     database_path,
+    is_usable,
     load_or_create,
-    read_active,
-    resolved_api_key,
-    select,
 )
 from ..core.media import decoder_version
 from ..core.pipeline import Pipeline
 from ..core.storage import Storage, StorageError
 from ..core.tasks import EventBus
 from .tui import Workbench
-from .tui.format import binding_label, role_label
+from .tui.format import role_label
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -67,25 +65,19 @@ def _workbench() -> int:
 
 def _show_config() -> int:
     loaded = load_or_create()
-    state = read_active()
     suffix = "（本次按模板创建，请填写密钥）" if loaded.created else ""
     print(f"配置：{loaded.path}{suffix}")
     for role in Role:
-        selection = select(loaded.config, role, state)
-        configured = _configured(selection)
-        print(f"\n{role_label(role)}（{role.value}）：{binding_label(selection, configured)}")
-        if selection.fell_back:
-            print(f"  注意：{selection.requested} 不在配置中，已回退")
-        bindings = loaded.config.roles.for_role(role)
-        if not bindings:
-            print("  未声明任何绑定")
-        for binding in bindings:
-            current = selection.binding is not None and selection.binding.name == binding.name
-            usable = "已配置" if resolved_api_key(binding) is not None else "未配置"
-            mark = "*" if current else " "
-            print(f" {mark} {binding.name}  {binding.model}  {binding.api_base}  {usable}")
-            if binding.env_var is not None:
-                print(f"     密钥取自环境变量 {binding.env_var}")
+        binding = loaded.config.for_role(role)
+        usable = "已配置" if is_usable(binding) else "未配置"
+        print(f"\n{role_label(role)}（{role.value}）：{usable}")
+        if binding is None:
+            print("  未声明模型")
+            continue
+        print(f"  模型  {binding.model}")
+        print(f"  地址  {binding.url}")
+        if binding.env_var is not None:
+            print(f"  密钥  环境变量 {binding.env_var}")
     return 0
 
 
@@ -111,16 +103,10 @@ def _doctor() -> int:
         print(f"[{'ok' if passed else 'fail'}] {name}  {detail}")
 
     if loaded is not None:
-        state = read_active()
         for role in Role:
-            selection = select(loaded.config, role, state)
-            configured = _configured(selection)
-            print(
-                f"[{'ok' if configured else 'warn'}] {role_label(role)}  "
-                f"{binding_label(selection, configured)}"
-            )
+            binding = loaded.config.for_role(role)
+            usable = is_usable(binding)
+            model = binding.model if binding is not None else "未配置模型"
+            detail = model if usable else f"{model}（缺少密钥）"
+            print(f"[{'ok' if usable else 'warn'}] {role_label(role)}  {detail}")
     return 0 if all(passed for _, passed, _ in checks) else 1
-
-
-def _configured(selection) -> bool:
-    return selection.binding is not None and resolved_api_key(selection.binding) is not None
