@@ -26,6 +26,7 @@ class EventKind(StrEnum):
     TASK_CANCELED = "task.canceled"
     TASK_SKIPPED = "task.skipped"
     LOG_LINE = "log.line"
+    ANSWER_DELTA = "answer.delta"
 
 
 @dataclass(frozen=True)

@@ -70,6 +70,7 @@ class Answering:
                 question=job.question,
                 evidence=evidence,
                 duration_ms=video.media.duration_ms if video.media is not None else 0,
+                on_delta=self._delta(job),
             )
         report(0.95, "保存结论")
         answer = self._store.record_answer(
@@ -99,6 +100,18 @@ class Answering:
                 collected.setdefault((item.start_ms, item.end_ms, item.label), item)
             report(0.1 + 0.45 * index / total, None)
         return tuple(collected[key] for key in sorted(collected))
+
+    def _delta(self, job: JobRecord) -> Callable[[str], None]:
+        """Publish each piece of the answer as it is written, so the panel can show it."""
+
+        def publish(piece: str) -> None:
+            self._bus.publish(
+                Event.stamp(
+                    EventKind.ANSWER_DELTA, job_id=job.id, payload={"delta": piece}
+                )
+            )
+
+        return publish
 
     def _log(self, job: JobRecord, message: str) -> None:
         """Publish one line of the trace; the interface renders it in the chat panel."""

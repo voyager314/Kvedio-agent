@@ -6,7 +6,7 @@ from textual.widgets import DataTable, Input, Static
 
 from kvedio_agent1.core.asr import AsrStage
 from kvedio_agent1.core.config import load_or_create
-from kvedio_agent1.core.domain import Citation, JobStatus, Segment
+from kvedio_agent1.core.domain import Citation, Event, EventKind, JobStatus, Segment
 from kvedio_agent1.core.llm import Reply
 from kvedio_agent1.core.memory import MemoryBuilder
 from kvedio_agent1.core.pipeline import Pipeline, Stages
@@ -212,3 +212,37 @@ def test_a_scene_citation_is_marked_in_the_evidence_panel():
     assert _span(Citation(start_ms=1_000, end_ms=2_000, quote="看", kind="scene")) == "画面 00:01"
     assert _span(Citation(start_ms=1_000, end_ms=2_000, quote="说")) == "00:01"
     assert _span(Citation(1_000, 9_000, "说")) == "00:01–00:09"
+
+def test_the_answer_is_shown_while_it_is_written(home, tmp_path, make_answerer):
+    loaded = load_or_create()
+    store = Storage(tmp_path / "kvedio.db")
+    bus = EventBus()
+    pipeline = build(
+        store, Workspace(tmp_path / "workspace"), bus, loaded, make_answerer(store)
+    )
+
+    async def scenario() -> None:
+        app = Workbench(loaded, store, pipeline, bus)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for piece in ("预算", "还差", "二十万"):
+                bus.publish(
+                    Event.stamp(
+                        EventKind.ANSWER_DELTA,
+                        job_id="job_test",
+                        payload={"delta": piece},
+                    )
+                )
+            panel = app.query_one("#answer", Static)
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if "预算还差二十万" in str(panel.render()):
+                    break
+            assert "预算还差二十万" in str(panel.render())
+            assert panel.styles.display == "block"
+            app._close_stream()
+            await pilot.pause()
+            assert panel.styles.display == "none"
+
+    asyncio.run(scenario())
+    store.close()

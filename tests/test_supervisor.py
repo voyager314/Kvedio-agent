@@ -34,6 +34,12 @@ class ScriptedChat:
             text=self._replies.pop(0), model="stub", prompt_tokens=0, completion_tokens=0
         )
 
+    def stream(self, messages, on_delta):
+        reply = self.complete(messages)
+        for piece in reply.text:
+            on_delta(piece)
+        return reply
+
 
 def plan(*steps: tuple[str, dict]) -> str:
     return json.dumps(
@@ -228,9 +234,12 @@ def test_the_loop_plans_searches_answers_and_records_citations(store):
     assert len(chat.calls) == 2
     assert reports[-1] >= 0.9
 
-    notes = [event.payload["message"] for event in _drain(channel)]
+    events = _drain(channel)
+    notes = [event.payload["message"] for event in events if "message" in event.payload]
+    deltas = [event.payload["delta"] for event in events if "delta" in event.payload]
     assert any("按计划执行 2 步" in note for note in notes)
     assert any("search(预算)" in note for note in notes)
+    assert "".join(deltas) == answer.text
 
 
 def test_the_loop_says_so_when_nothing_matched(store):

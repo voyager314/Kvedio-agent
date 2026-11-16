@@ -126,3 +126,58 @@ def test_each_reply_reports_its_usage():
     assert seen[0].kind is UsageKind.CHAT
     assert seen[0].model == "chat-model-0613"
     assert (seen[0].prompt_tokens, seen[0].completion_tokens) == (12, 7)
+
+def sse(*pieces: str, usage: dict | None = None) -> httpx.Response:
+    body = b""
+    for piece in pieces:
+        chunk = {"model": "chat-model-stream", "choices": [{"delta": {"content": piece}}]}
+        body += b"data: " + json.dumps(chunk).encode() + b"\n\n"
+    if usage is not None:
+        tail = {"model": "chat-model-stream", "choices": [], "usage": usage}
+        body += b"data: " + json.dumps(tail).encode() + b"\n\n"
+    body += b"data: [DONE]\n\n"
+    return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+
+def test_streaming_hands_over_each_piece():
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.read())["stream"] is True
+        return sse("预算", "还差", "二十万")
+
+    reply = build(handler).stream([Message("user", "hi")], seen.append)
+
+    assert reply.text == "预算还差二十万"
+    assert "".join(seen) == reply.text
+    assert reply.model == "chat-model-stream"
+
+
+def test_a_stream_failure_before_any_text_is_retried():
+    calls: list[int] = []
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(503, text="busy")
+        return sse("ok")
+
+    reply = build(handler, sleep=delays.append).stream([Message("user", "x")], lambda piece: None)
+
+    assert reply.text == "ok"
+    assert len(calls) == 2
+    assert delays == [1.0]
+
+
+def test_streaming_reports_the_usage_of_the_final_chunk():
+    seen = []
+    usage = {"prompt_tokens": 5, "completion_tokens": 7}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return sse("ok", usage=usage)
+
+    build(handler, usage=seen.append).stream([Message("user", "x")], lambda piece: None)
+
+    assert seen[0].prompt_tokens == 5
+    assert seen[0].completion_tokens == 7

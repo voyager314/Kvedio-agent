@@ -38,7 +38,7 @@ def send(
             if response.status_code < 400:
                 return response
             failure = describe(response)
-            if not _retryable(response.status_code):
+            if not retryable(response.status_code):
                 raise failure
         if attempt < attempts:
             sleep(min(30.0, 2.0 ** (attempt - 1)))
@@ -62,5 +62,6 @@ def describe(response: httpx.Response) -> ModelError:
     return ModelError(f"HTTP {response.status_code}{detail}")
 
 
-def _retryable(status: int) -> bool:
+def retryable(status: int) -> bool:
+    """Whether a refusal of this status may be worth another attempt."""
     return status in RETRYABLE or status >= 500

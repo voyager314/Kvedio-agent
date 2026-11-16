@@ -108,6 +108,13 @@ class Workbench(App[None]):
     #prompt {
         border: round $accent;
     }
+    #answer {
+        display: none;
+        height: auto;
+        max-height: 6;
+        border: round $accent;
+        padding: 0 1;
+    }
     #tasks {
         height: 2fr;
         border: round $primary;
@@ -147,6 +154,7 @@ class Workbench(App[None]):
         self._task_rows: set[str] = set()
         self._latest: JobRecord | None = None
         self._running_jobs: set[str] = set()
+        self._streamed: list[str] = []  # the answer currently being written
         self._queue: list[Reference | str] = []  # requests waiting for the worker
         self._busy = False
 
@@ -155,6 +163,7 @@ class Workbench(App[None]):
         with Horizontal(id="body"):
             with Vertical(id="chat-column"):
                 yield RichLog(id="chat", markup=False, wrap=True, min_width=0)
+                yield Static(id="answer")
                 yield Input(id="prompt", placeholder="@路径 问题　或　/help")
             with Vertical(id="side-column"):
                 yield DataTable(id="tasks", zebra_stripes=True)
@@ -295,9 +304,16 @@ class Workbench(App[None]):
         if event.job_id is None:
             return
 
+        if kind is EventKind.ANSWER_DELTA:
+            delta = event.payload.get("delta")
+            if isinstance(delta, str) and delta:
+                self._streamed.append(delta)
+                self._render_stream()
+            return
         if kind is EventKind.JOB_QUEUED:
             self._watch(event.job_id)
         elif kind is EventKind.JOB_STARTED:
+            self._close_stream()
             self._watch(event.job_id)
             self._running_jobs.add(event.job_id)
         elif kind is EventKind.TASK_PROGRESS:
@@ -366,6 +382,7 @@ class Workbench(App[None]):
         label = job_status_label(job.status)
         message = f"作业 {label}：{detail}" if detail else f"作业 {label}"
         self._say(message, style="bold red" if job.status is JobStatus.FAILED else "green")
+        self._close_stream()
         self._announce_answer(job.id)
         self._render_timeline()
         self._render_evidence()
@@ -424,6 +441,18 @@ class Workbench(App[None]):
         first = format_duration(transcript.first_ms or 0)
         last = format_duration(transcript.last_ms or 0)
         return f"转录：{transcript.segment_count} 段 · {first}–{last} · {transcript.model}"
+
+    def _render_stream(self) -> None:
+        """Show the tail of the answer as it is written; the log gets the final text."""
+        panel = self.query_one("#answer", Static)
+        panel.styles.display = "block"
+        panel.update("".join(self._streamed)[-600:])
+
+    def _close_stream(self) -> None:
+        self._streamed.clear()
+        panel = self.query_one("#answer", Static)
+        panel.update("")
+        panel.styles.display = "none"
 
     def _memory_line(self, video: VideoRecord) -> str:
         """Whether the map and the vector index exist, and how large they are."""
@@ -531,6 +560,7 @@ class Workbench(App[None]):
         if not running and not dropped:
             self._say("没有正在运行的作业。", style="dim")
             return
+        self._close_stream()
         parts = []
         if running:
             parts.append("已请求取消当前作业")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from ...tools import Evidence
@@ -36,6 +36,7 @@ def write(
     question: str,
     evidence: Sequence[Evidence],
     duration_ms: int,
+    on_delta: Callable[[str], None] | None = None,
 ) -> Conclusion:
     """Ask for an answer and check every citation before returning it.
 
@@ -50,7 +51,7 @@ def write(
     )
     base = [Message(role="system", content=system)]
 
-    reply = chat.complete(base)
+    reply = chat.stream(base, on_delta) if on_delta is not None else chat.complete(base)
     verdict = citations.check(reply.text, evidence)
     if verdict.ok:
         return Conclusion(text=reply.text.strip(), citations=verdict.citations)

@@ -7,6 +7,7 @@ to the stage that asks.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -16,7 +17,12 @@ import httpx
 
 from ..domain import Usage, UsageKind
 from . import retry
+from .errors import ModelError
 from .reply import Reply, parse_reply
+
+
+class _Retryable(ModelError):
+    """A refusal that happened before any text was emitted, so a retry costs nothing visible."""
 
 
 @dataclass(frozen=True)
@@ -76,6 +82,109 @@ class Chat:
                     model=reply.model or self._model,
                     prompt_tokens=reply.prompt_tokens,
                     completion_tokens=reply.completion_tokens,
+                )
+            )
+        return reply
+
+    def stream(
+        self, messages: Sequence[Message], on_delta: Callable[[str], None]
+    ) -> Reply:
+        """Stream one answer, handing each piece to ``on_delta`` as it arrives.
+
+        A refusal or transport failure before the first piece is retried like any
+        other call. Once text has been handed over, a failure is raised instead of
+        retried: repeating the request would repeat what the caller already showed.
+        """
+        state = {"emitted": False}
+
+        def emit(piece: str) -> None:
+            state["emitted"] = True
+            on_delta(piece)
+
+        for attempt in range(1, self._attempts + 1):
+            state["emitted"] = False
+            try:
+                return self._stream_once(messages, emit)
+            except _Retryable:
+                if state["emitted"] or attempt == self._attempts:
+                    raise
+                self._sleep(min(30.0, 2.0 ** (attempt - 1)))
+        raise ModelError("请求没有发出")
+
+    def _stream_once(
+        self, messages: Sequence[Message], emit: Callable[[str], None]
+    ) -> Reply:
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": [{"role": item.role, "content": item.content} for item in messages],
+            "temperature": self._temperature,
+            "stream": True,
+        }
+        try:
+            with (
+                httpx.Client(timeout=self._timeout, transport=self._transport) as client,
+                client.stream(
+                    "POST",
+                    self._url,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json=payload,
+                ) as response,
+            ):
+                if response.status_code >= 400:
+                    response.read()
+                    failure = retry.describe(response)
+                    if retry.retryable(response.status_code):
+                        raise _Retryable(str(failure))
+                    raise failure
+                return self._read_stream(response, emit)
+        except httpx.TransportError as error:
+            raise _Retryable(f"请求未送达：{type(error).__name__}") from error
+
+    def _read_stream(
+        self, response: httpx.Response, emit: Callable[[str], None]
+    ) -> Reply:
+        pieces: list[str] = []
+        model = self._model
+        prompt_tokens = 0
+        completion_tokens = 0
+        for line in response.iter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except ValueError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            model = str(chunk.get("model") or model)
+            for choice in chunk.get("choices") or []:
+                delta = (choice or {}).get("delta") or {}
+                piece = delta.get("content")
+                if isinstance(piece, str) and piece:
+                    pieces.append(piece)
+                    emit(piece)
+            usage = chunk.get("usage")
+            if isinstance(usage, dict):
+                prompt_tokens = int(usage.get("prompt_tokens") or prompt_tokens)
+                completion_tokens = int(usage.get("completion_tokens") or completion_tokens)
+        if not pieces:
+            raise ModelError("流式响应没有内容")
+        reply = Reply(
+            text="".join(pieces),
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        if self._usage is not None:
+            self._usage(
+                Usage(
+                    kind=UsageKind.CHAT,
+                    model=model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
                 )
             )
         return reply
