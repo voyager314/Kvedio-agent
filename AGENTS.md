@@ -5,8 +5,9 @@ Instructions for AI coding agents working in this repository.
 ## What this repository is
 
 A command-line agent that analyzes long videos held on the local disk. The user
-uploads an mp4, states what to find out about it, and receives a conclusion whose
-every claim points at the moment in the recording that supports it.
+references an mp4 in place, states what to find out about it, and receives a
+conclusion whose every claim points at the moment in the recording that supports
+it.
 
 The product owns five capabilities:
 
@@ -18,12 +19,15 @@ The product owns five capabilities:
 - **Analysis.** Summarize and answer questions about the content. A conclusion
   arrives with timestamped evidence, an execution plan, a stage-by-stage trace,
   and a quality assessment; a bare paragraph of prose is an incomplete result.
-- **Job management.** A workbench view lists uploaded videos and their analysis
+- **Job management.** A workbench view lists referenced videos and their analysis
   jobs, shows progress while a job runs, and keeps a finished result open for
   further questions about the same video. A follow-up is answered from the
   multi-turn context at hand; where that history is persisted is undecided.
-- **Ingestion.** Chunked upload with resume. A transfer interrupted partway
-  continues from the last acknowledged chunk instead of starting over.
+- **Ingestion.** A video enters the system by its path, not by a copy. Identity
+  is the file's content fingerprint, so a replaced or truncated source is a
+  different video rather than the same one carrying stale artifacts. Taking a
+  copy into the workspace is offered on request and resumes from the last
+  verified block instead of starting over.
 
 The terminal is the interface. Rendering uses panels, tables, and live progress
 rather than plain text output, and interaction is prompted rather than typed as
@@ -66,6 +70,23 @@ covers only what no other document states.
 A file's directory states the role it plays, and nothing else decides it: not what
 the file imports, not who calls it, not when it was written, not how long it is. A
 reader who knows a module's role knows where to open it without searching.
+
+### The packages
+
+| Package | Role |
+| --- | --- |
+| `cli/` | Process entry: parse subcommands, assemble dependencies, hand control to the workbench. |
+| `tui/` | Terminal surface: screens, panels, the mapping from events to rendering. |
+| `domain/` | Values passed across layers: video records, jobs, tasks, events. No I/O. |
+| `config/` | User configuration: discovery, template creation, validation, redaction, program state write-back. |
+| `storage/` | SQLite connection, schema migration, repositories. |
+| `tasks/` | Task state machine, event bus, DAG scheduler, worker pool. |
+| `pipeline/` | Turns one request into a task graph and drives the stages. |
+| `media/` | Decode-level work: probe, audio extraction, frame sampling, scene boundaries. |
+| `default/` | Packaged templates: configuration sample, prompts. |
+
+A package absent from this table does not exist. Introducing one edits this table
+first, then the tree.
 
 ### The root
 
