@@ -277,6 +277,20 @@ CREATE TABLE event_run (
 ALTER TABLE answer_citation ADD COLUMN kind TEXT NOT NULL DEFAULT 'transcript';
 ```
 
+每次调用一行。不在这里做聚合：汇总随时可算，历史丢了就没了。
+
+```sql
+CREATE TABLE usage (
+  id                INTEGER PRIMARY KEY,
+  kind              TEXT    NOT NULL,   -- chat / transcription / embedding / vision
+  model             TEXT    NOT NULL,
+  prompt_tokens     INTEGER NOT NULL,   -- 0 表示上游没报，不代表免费
+  completion_tokens INTEGER NOT NULL,
+  seconds           REAL    NOT NULL,   -- 转写按音频秒计费
+  created_at        TEXT    NOT NULL
+);
+```
+
 `artifact` 仍未建立：它要等视觉阶段产生独立文件，届时再随迁移加入。计划与轨迹刻意不落库：它们是本次作答的中间过程，界面上按事件显示，重放一段过期计划没有意义。
 
 ### 4.2 引用规则
@@ -285,7 +299,7 @@ ALTER TABLE answer_citation ADD COLUMN kind TEXT NOT NULL DEFAULT 'transcript';
 
 ### 4.3 迁移
 
-`PRAGMA user_version` 记录当前版本，现为 6。启动时若版本低于代码期望，按顺序执行各版本的迁移脚本；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。版本高于代码时拒绝打开：那些列没有反向迁移，继续写会静默丢数据。
+`PRAGMA user_version` 记录当前版本，现为 7。启动时若版本低于代码期望，按顺序执行各版本的迁移脚本；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。版本高于代码时拒绝打开：那些列没有反向迁移，继续写会静默丢数据。
 
 ## 5. 任务模型
 
@@ -331,6 +345,14 @@ pending ──► ready ──► running ──► succeeded
 ### 5.4 部分成功
 
 作业的终态由任务图决定：全部成功为 `succeeded`；有成功也有失败为 `partial`；全部失败为 `failed`。`partial` 的作业照常产出结论，结论里必须标明缺失的那部分证据。作答失败也是失败：给出一个没有引用的"结论"比给不出更糟，所以此时作业停在 `partial` 或 `failed`，界面上写明原因。
+
+### 5.5 取消
+
+取消是协作式的：界面把信号交给管道，调度器在节点之间检查，阶段在工作单元之间检查（一个分片、一批向量、一个场景、一次工具调用）。已经提交的产物保留，所以取消后的作业与中断一样能续跑，区别只是任务状态是 `canceled` 而不是 `failed`——没有东西出错，是运行被叫停。
+
+被取消的任务不重试：重试一个刚被叫停的分片会花掉用户刚刚拒绝的钱。取消到达时正在执行的节点不会被杀死，它在下一次检查时退出；界面上的"已取消"因此可能比按键晚一拍，这是有意的——强杀线程会留下写了一半的产物。
+
+已发出请求的模型调用无法中途收回：取消只保证不再发出下一个调用，已经花掉的那一次照常记账。
 
 ## 6. 并发
 
@@ -424,14 +446,14 @@ runtime:
 
 | 区域 | 内容 | 空态 |
 | --- | --- | --- |
-| 对话 | 用户输入、系统回复、计划与检索轨迹 | 显示用法提示与配置状态 |
+| 对话 | 用户输入、系统回复、计划与检索轨迹；作答时下方一行实时显示正在写的结论 | 显示用法提示与配置状态 |
 | 任务 | 任务 ID、角色、动作、状态、进度、耗时 | 显示"尚未引用视频" |
 | 时间轴 | 时长、容器、转录段数与覆盖区间、记忆规模（覆盖图/向量/场景） | 显示"尚未引用视频" |
 | 证据 | 当前结论引用的时间点与转录原文 | 显示"暂无证据" |
 
 状态栏常驻：数据库文件名、三个角色使用的模型与可用状态、运行中任务数。
 
-输入语法：`@<相对路径> <问题>` 引用视频并起作业；直接输入一句话，就是对当前视频的追问；`/model` 列出模型与端点；`/help` 列出语法；`/quit` 退出。路径解析以进程工作目录为基准，解析失败在对话区报错并保留原文，不清空输入。
+输入语法：`@<相对路径> <问题>` 引用视频并起作业；直接输入一句话，就是对当前视频的追问；`/model` 列出模型与端点；`/cancel` 取消当前作业并清空排队；`/usage` 汇总各模型的调用量；`/help` 列出语法；`/quit` 退出。路径解析以进程工作目录为基准，解析失败在对话区报错并保留原文，不清空输入。
 
 ## 11. 里程碑
 
@@ -478,6 +500,13 @@ runtime:
 - 界面：时间轴显示覆盖图块数与向量条数。
 
 验收：46 段的录像建图 8 块、向量 46 条，二次构建零调用（`test_a_second_build_costs_nothing`）；第二批向量中断后重跑只补一批（`test_an_interrupted_build_resumes_at_the_first_missing_batch`）；换嵌入模型后向量仍是 46 条而不是 92 条（`test_a_new_embedding_model_replaces_the_old_vectors`）；"资金"这种说法在转写里不存在时，只有向量能把它召回到预算段落（`test_hybrid_memory_finds_what_keywords_alone_miss`）。
+
+**M5 硬化（已实现）**
+- 取消：`/cancel` 停止当前作业并清空排队。信号在节点之间与工作单元之间检查；已完成的产物保留，作业记为 `canceled`，可以像中断一样续跑。转写改为按批提交，取消能在一批内生效，而不是等所有分片排完队。
+- 流式：作答的第一次调用走 SSE，逐段发 `answer.delta`，界面在对话区下方实时显示，结束后整段落到对话区。第一次文字出现之前的失败会重试，出现之后的失败不再重试——重复请求会把已经显示的文字再发一遍。
+- 用量：对话、视觉、嵌入三个客户端上报 token，转写按音频秒计；`/usage` 按类型与模型汇总，`calls` 与 token 分开记，上游没报用量的调用仍然可见，只是 token 为 0。
+
+验收：取消后作业为 `canceled`、后续节点不再运行、已完成分片保留（`test_cancellation_stops_the_graph_without_retrying`、`test_a_running_job_can_be_cancelled`）；流式增量拼起来等于落库的结论（`test_streaming_hands_over_each_piece`）；用量按类型与模型汇总（`test_usage_is_summed_by_kind_and_model`）。
 
 跨视频检索尚未实现：结论的引用目前属于"一条结论一个视频"，跨视频要先给 `answer_citation` 加视频归属、扩展引用格式，再谈多视频取证。这是下一个增量，不塞进本阶段。
 
