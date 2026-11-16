@@ -36,18 +36,25 @@ def write(
     question: str,
     evidence: Sequence[Evidence],
     duration_ms: int,
+    limits: Sequence[str] = (),
     on_delta: Callable[[str], None] | None = None,
 ) -> Conclusion:
     """Ask for an answer and check every citation before returning it.
 
-    One repair attempt is allowed, with the offending moments named back to the
-    model; a second failure raises. The alternative — storing the text as given —
-    would leave the interface showing a timestamp that opens nothing.
+    ``limits`` names the sources this recording could not supply, so the prompt
+    can keep the model from claiming more than the evidence covers. One repair
+    attempt is allowed, with the offending moments named back to the model; a
+    second failure raises. The alternative — storing the text as given — would
+    leave the interface showing a timestamp that opens nothing.
     """
     if not evidence:
         raise ValueError("没有可用的证据")
     system = prompts.render(
-        "answer", question=question, evidence=evidence, duration_ms=duration_ms
+        "answer",
+        question=question,
+        evidence=evidence,
+        duration_ms=duration_ms,
+        limits=limits,
     )
     base = [Message(role="system", content=system)]
 
@@ -76,12 +83,14 @@ def _rejection(verdict: citations.Verdict) -> str:
     return "结论引用了未检索到的时间点：" + "、".join(verdict.missing)
 
 
-def write_absence(chat: Chat, *, question: str) -> str:
-    """Say that the recording does not cover the question, in the question's language.
+def write_absence(chat: Chat, *, question: str, limits: Sequence[str] = ()) -> str:
+    """Say that the available evidence does not cover the question, in its language.
 
     Retrieval found nothing, so there is no evidence to cite and no citation check
-    to run. The model is still asked because only the supervisor speaks to the
-    user, and a fixed sentence would answer in the wrong language half the time.
+    to run. ``limits`` distinguishes "the recording does not cover this" from
+    "the source that would have covered it was unavailable", which the model must
+    not conflate. The model is still asked because only the supervisor speaks to
+    the user, and a fixed sentence would answer in the wrong language half the time.
     """
-    system = prompts.render("no_evidence", question=question)
+    system = prompts.render("no_evidence", question=question, limits=limits)
     return chat.complete([Message(role="system", content=system)]).text.strip()

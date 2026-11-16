@@ -1,9 +1,18 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from kvedio_agent1.core.domain import Chunk, MediaInfo, NewTask, Scene, Segment
+from kvedio_agent1.core.domain import (
+    Chunk,
+    DependencyMode,
+    MediaInfo,
+    NewTask,
+    Scene,
+    Segment,
+    TaskStatus,
+)
 from kvedio_agent1.core.llm import Message, Reply
 from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.core.supervisor import Answering, UnsupportedCitation
@@ -125,6 +134,16 @@ def test_a_plan_is_truncated_to_the_step_ceiling():
     chat = ScriptedChat([plan(*steps)])
     result = make_plan(chat, "问题", TOOLS)
     assert len(result.steps) == MAX_STEPS
+
+
+def test_a_fallback_plan_uses_only_the_tools_the_video_can_supply():
+    chat = ScriptedChat(["这不是 JSON"])
+    offered = [tool for tool in TOOLS if tool.name == "scenes"]
+
+    result = make_plan(chat, "画面里有什么", offered)
+
+    assert [step.tool for step in result.steps] == ["scenes"]
+    assert "固定检索" in result.note
 
 
 # --- synthesis ------------------------------------------------------------
@@ -255,7 +274,7 @@ def test_the_loop_says_so_when_nothing_matched(store):
     assert "language of the question" in chat.calls[1][0].content.lower()
 
 
-def test_the_loop_refuses_to_answer_without_a_transcript(store):
+def test_the_loop_refuses_to_answer_without_any_evidence(store):
     video, job = prepare(store)
     second = store.register_video(
         Path("other.mp4"), size_bytes=2, mtime_ns=2, fingerprint="fp-none"
@@ -265,10 +284,103 @@ def test_the_loop_refuses_to_answer_without_a_transcript(store):
     )
     chat = ScriptedChat([])
 
-    with pytest.raises(ValueError, match="转录"):
+    with pytest.raises(ValueError, match="转录或画面描述"):
         Answering(store, EventBus(), chat, "chat-model").answer(
             empty_job, lambda fraction, message: None
         )
+
+
+def test_a_picture_only_video_is_answered_and_cited_as_a_scene(store):
+    video = store.register_video(
+        Path("silent.mp4"), size_bytes=3, mtime_ns=3, fingerprint="fp-visual"
+    )
+    store.record_media(
+        video.id,
+        MediaInfo(
+            duration_ms=5_000,
+            container="mp4",
+            video_codec="h264",
+            width=320,
+            height=180,
+            fps=25.0,
+            audio_codec=None,
+            sample_rate=None,
+            channels=None,
+        ),
+    )
+    store.save_scene(video.id, "sk", 0, Scene(0, 4_000, "白板上写着预算", "/tmp/frame.jpg"))
+    job = store.create_job(
+        video.id, "画面里有什么", [NewTask(id="answer", agent="supervisor", action="answer")]
+    )
+    chat = ScriptedChat([plan(("scenes", {})), "白板上写着预算 [00:01]。"])
+
+    answer = Answering(store, EventBus(), chat, "chat-model").answer(
+        job, lambda fraction, message: None
+    )
+
+    assert answer.citations[0].kind == "scene"
+    assert answer.citations[0].quote == "白板上写着预算"
+    assert "证据范围" not in answer.text
+    assert "该视频没有音轨" in chat.calls[1][0].content
+
+
+def test_a_failed_vision_run_is_named_in_the_conclusion(store):
+    video = store.register_video(
+        Path("lecture.mp4"), size_bytes=4, mtime_ns=4, fingerprint="fp-gap"
+    )
+    store.record_media(
+        video.id,
+        MediaInfo(
+            duration_ms=20_000,
+            container="mp4",
+            video_codec="h264",
+            width=320,
+            height=180,
+            fps=25.0,
+            audio_codec="aac",
+            sample_rate=48_000,
+            channels=2,
+        ),
+    )
+    transcript = store.open_transcript(video.id, "key", "asr", "transcribe")
+    store.save_chunk(
+        transcript.id,
+        video.id,
+        "transcribe",
+        "key",
+        Chunk(index=0, start_ms=0, end_ms=20_000),
+        SEGMENTS,
+    )
+    store.finish_transcript(transcript.id)
+    job = store.create_job(
+        video.id,
+        "预算够吗",
+        [
+            NewTask(id="vision", agent="vision", action="describe"),
+            NewTask(
+                id="answer",
+                agent="supervisor",
+                action="answer",
+                depends_on=("vision",),
+                dependency_mode=DependencyMode.PARTIAL,
+            ),
+        ],
+    )
+    tasks = {task.id: task for task in store.tasks_for_job(job.id)}
+    store.save_task(
+        replace(tasks["vision"], status=TaskStatus.FAILED, error="视觉模型不可用")
+    )
+    chat = ScriptedChat([plan(("search", {"query": "预算"})), "预算还差二十万 [00:05]。"])
+
+    answer = Answering(store, EventBus(), chat, "chat-model").answer(
+        job, lambda fraction, message: None
+    )
+
+    assert "预算还差二十万" in answer.text
+    assert answer.text.endswith(
+        "证据范围：本次作答有证据缺失——画面描述不可用（视觉模型不可用）。"
+    )
+    assert "Evidence not available" in chat.calls[1][0].content
 
 
 def _drain(channel) -> list:

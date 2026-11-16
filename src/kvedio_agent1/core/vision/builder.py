@@ -93,6 +93,9 @@ class VisionBuilder:
         self._store.prune_scenes(video.id, key)
         done = self._store.scene_positions(video.id, key)
         described = len(done)
+        # The picture branch does not wait for transcription: these segments may
+        # still be growing while the scenes are described. They are context for
+        # the description, not a quotation, so an incomplete set is usable.
         segments = self._store.transcript_segments(video.id)
         for position, scene in enumerate(detected):
             if position in done:

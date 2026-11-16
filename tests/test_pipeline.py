@@ -7,7 +7,15 @@ import pytest
 
 from kvedio_agent1.core.asr import AsrStage
 from kvedio_agent1.core.config.schema import RuntimeLimits
-from kvedio_agent1.core.domain import Event, EventKind, JobStatus, Segment, TaskStatus
+from kvedio_agent1.core.domain import (
+    DependencyMode,
+    Event,
+    EventKind,
+    JobStatus,
+    Scene,
+    Segment,
+    TaskStatus,
+)
 from kvedio_agent1.core.llm import Reply
 from kvedio_agent1.core.memory import MemoryBuilder
 from kvedio_agent1.core.pipeline import Pipeline, Stages
@@ -199,13 +207,15 @@ def test_without_a_supervisor_the_job_stops_at_the_answer(store, workspace, samp
     assert "未配置对话模型" in tasks["answer"].error
 
 
-def test_a_video_without_audio_cannot_be_answered(store, workspace, answerer, silent_video):
+def test_a_silent_video_without_pictures_has_nothing_to_answer_from(
+    store, workspace, answerer, silent_video
+):
     pipeline, _ = build(store, workspace, answerer)
 
     finished = pipeline.run(pipeline.submit(silent_video, "讲了什么"))
 
     assert finished.status is JobStatus.PARTIAL
-    assert "没有音轨" in finished.error
+    assert "没有可用的转录或画面描述" in finished.error
     assert store.transcript(finished.video_id) is None
     tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
     assert tasks["transcribe"].status is TaskStatus.SUCCEEDED  # nothing to transcribe
@@ -226,21 +236,24 @@ class _Vision:
         return VisionStats(scenes=1, described=1)
 
 
-def test_vision_runs_after_memory(store, workspace, answerer, sample_video):
+def test_vision_and_transcription_hang_from_the_probe_as_separate_branches(
+    store, workspace, answerer, sample_video
+):
     vision = _Vision()
-    pipeline, _ = build(store, workspace, answerer, vision=vision)
+    memory = MemoryBuilder(store, _Chat(), _Embedder(), model="stub")
+    pipeline, _ = build(store, workspace, answerer, memory=memory, vision=vision)
 
     finished = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
 
     assert finished.status is JobStatus.SUCCEEDED, finished.error
-    assert [task.id for task in store.tasks_for_job(finished.id)] == [
-        "probe",
-        "audio",
-        "transcribe",
-        "vision",
-        "answer",
-    ]
+    tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
+    assert tasks["transcribe"].depends_on == ("audio",)
+    assert tasks["memory"].depends_on == ("transcribe",)
+    assert tasks["vision"].depends_on == ("probe",)
+    assert tasks["answer"].depends_on == ("memory", "vision")
+    assert tasks["answer"].dependency_mode is DependencyMode.PARTIAL
     assert vision.builds == 1
+
 
 class _Events:
     """An extractor with no events yet: like the real one before any shot exists."""
@@ -257,22 +270,105 @@ class _Events:
         return EventStats(events=2)
 
 
-def test_events_follow_a_fresh_vision_run(store, workspace, answerer, sample_video):
+def test_events_hang_from_vision_alone(store, workspace, answerer, sample_video):
     vision, events = _Vision(), _Events()
     pipeline, _ = build(store, workspace, answerer, vision=vision, events=events)
 
     finished = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
 
     assert finished.status is JobStatus.SUCCEEDED, finished.error
-    assert [task.id for task in store.tasks_for_job(finished.id)] == [
-        "probe",
-        "audio",
-        "transcribe",
-        "vision",
-        "events",
-        "answer",
-    ]
+    tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
+    assert tasks["events"].depends_on == ("vision",)
+    assert tasks["answer"].depends_on == ("transcribe", "events")
     assert events.builds == 1
+
+
+class _BrokenVision:
+    """A describer that fails before writing a single scene."""
+
+    def __init__(self) -> None:
+        self.builds = 0
+
+    def current(self, video) -> bool:
+        return False
+
+    def build(self, video, report, *, cancelled=None) -> VisionStats:
+        self.builds += 1
+        raise RuntimeError("视觉模型不可用")
+
+
+class _BrokenSpeech:
+    """A transcriber that fails after the audio was prepared."""
+
+    def __call__(self, audio: Path) -> list[Segment]:
+        raise RuntimeError("转写服务不可用")
+
+
+class _SceneWriter:
+    """A describer that writes one scene, so a picture-only answer has evidence."""
+
+    def __init__(self, store) -> None:
+        self._store = store
+
+    def current(self, video) -> bool:
+        return False
+
+    def build(self, video, report, *, cancelled=None) -> VisionStats:
+        self._store.save_scene(
+            video.id,
+            "scene-key",
+            0,
+            Scene(0, 900, "画面里有人在写代码", "/tmp/0.jpg"),
+        )
+        report(1.0, "场景")
+        return VisionStats(scenes=1, described=1)
+
+
+def test_a_vision_failure_still_answers_from_the_transcript(
+    store, workspace, answerer, sample_video
+):
+    pipeline, _ = build(
+        store, workspace, answerer, vision=_BrokenVision(), events=_Events()
+    )
+
+    finished = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
+
+    tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
+    assert finished.status is JobStatus.PARTIAL
+    assert tasks["transcribe"].status is TaskStatus.SUCCEEDED
+    assert tasks["vision"].status is TaskStatus.FAILED
+    assert tasks["events"].status is TaskStatus.SKIPPED
+    assert tasks["answer"].status is TaskStatus.SUCCEEDED
+    assert store.answer(finished.id) is not None
+
+
+def test_a_transcript_failure_still_answers_from_the_pictures(
+    store, workspace, answerer, sample_video
+):
+    vision = _SceneWriter(store)
+    memory = MemoryBuilder(store, _Chat(), _Embedder(), model="stub")
+    pipeline, _ = build(
+        store,
+        workspace,
+        answerer,
+        transcribe=_BrokenSpeech(),
+        memory=memory,
+        vision=vision,
+    )
+
+    finished = pipeline.run(pipeline.submit(sample_video, "画面里在做什么"))
+
+    tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
+    assert finished.status is JobStatus.PARTIAL
+    assert tasks["transcribe"].status is TaskStatus.FAILED
+    assert tasks["memory"].status is TaskStatus.SKIPPED
+    assert tasks["vision"].status is TaskStatus.SUCCEEDED
+    assert tasks["answer"].status is TaskStatus.SUCCEEDED
+    answer = store.answer(finished.id)
+    assert answer is not None
+    assert answer.citations[0].kind == "scene"
+    assert answer.citations[0].quote == "画面里有人在写代码"
+
 
 def test_a_running_job_can_be_cancelled(store, workspace, answerer, sample_video):
     gate = threading.Event()

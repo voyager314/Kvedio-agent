@@ -94,7 +94,12 @@ class ToolResult:
 
 
 class ToolBox:
-    """The tools one question may use, with a shared evidence budget."""
+    """The tools one question may use, with a shared evidence budget.
+
+    ``tools`` is the catalogue this box actually offers: a caller that knows only
+    the transcript exists passes a narrower list, so the planner never spends a
+    step on a source the recording cannot supply.
+    """
 
     def __init__(
         self,
@@ -102,17 +107,19 @@ class ToolBox:
         video: VideoRecord,
         memory: VideoMemory,
         *,
+        tools: Sequence[Tool] = TOOLS,
         budget: int = MAX_EVIDENCE_CHARS,
     ) -> None:
         self._store = store
         self._video = video
         self._memory = memory
+        self._tools = tuple(tools)
         self._remaining = max(0, budget)
 
     @property
     def tools(self) -> tuple[Tool, ...]:
         """The catalogue a planner chooses from; the same list this box can dispatch."""
-        return TOOLS
+        return self._tools
 
     def call(self, name: str, arguments: Mapping[str, Any]) -> ToolResult:
         """Run one tool; an unknown name answers with a note instead of raising."""

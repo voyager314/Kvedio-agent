@@ -1,11 +1,27 @@
-"""Answering one question about one video from its transcript."""
+"""Answering one question about one video from the evidence it actually has.
+
+The transcript and the scene descriptions are separate products of separate
+branches, and either can be missing. This module first takes stock of what the
+store holds, offers the planner only the tools whose data exists, and writes a
+conclusion from that subset. A branch that failed narrows the answer; it does not
+cancel it, and the conclusion names the gap.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 
-from ...tools import Evidence, ToolBox
-from ..domain import Answer, Event, EventKind, JobRecord
+from ...tools import TOOLS, Evidence, Tool, ToolBox
+from ..domain import (
+    Answer,
+    Event,
+    EventKind,
+    JobRecord,
+    TaskRecord,
+    TaskStatus,
+    VideoRecord,
+)
 from ..llm import Chat, Embedder
 from ..memory import VideoMemory
 from ..storage import Storage, StorageError
@@ -16,6 +32,40 @@ from .synthesis import Conclusion, write, write_absence
 Report = Callable[[float, str | None], None]
 
 
+@dataclass(frozen=True)
+class Sources:
+    """Which evidence one video can offer, and what is absent.
+
+    ``transcript`` and ``scenes`` are the two citable sources; events group the
+    scenes and are never cited on their own. ``limits`` names every absent source
+    for the prompt. ``missing`` keeps only the absences this job tried to fill and
+    could not, which is what the conclusion has to disclose.
+    """
+
+    transcript: bool
+    scenes: bool
+    events: bool
+    limits: tuple[str, ...]
+    missing: tuple[str, ...]
+
+    @property
+    def any(self) -> bool:
+        """Whether at least one citable source exists."""
+        return self.transcript or self.scenes
+
+    @property
+    def tools(self) -> tuple[Tool, ...]:
+        """The catalogue entries whose backing data exists, in catalogue order."""
+        names: set[str] = set()
+        if self.transcript:
+            names.update(("overview", "search", "read_range"))
+        if self.scenes:
+            names.add("scenes")
+        if self.events:
+            names.add("events")
+        return tuple(tool for tool in TOOLS if tool.name in names)
+
+
 class Answering:
     """Runs one question through plan, retrieval and synthesis, then stores the result.
 
@@ -23,6 +73,9 @@ class Answering:
     each can be tested alone. Every step is announced on the bus, which is how the
     interface shows the trace — a conclusion is easier to trust when the searches
     behind it are visible.
+
+    A video with neither words nor pictures has nothing to answer from and raises.
+    Any narrower set of sources answers from what is there.
     """
 
     def __init__(
@@ -42,26 +95,34 @@ class Answering:
     def answer(
         self, job: JobRecord, report: Report, *, cancelled: Callable[[], bool] | None = None
     ) -> Answer:
-        """Plan, retrieve, write, check, store — or raise, leaving no answer behind."""
+        """Plan, retrieve, write, check, store — or raise when no source exists."""
         stop_if(cancelled)
         video = self._store.video(job.video_id)
         if video is None:
             raise StorageError(f"视频不存在：{job.video_id}")
-        transcript = self._store.transcript(video.id)
-        if transcript is None or not transcript.ready:
-            raise ValueError("没有可用的转录，无法作答")
+        sources = self._sources(video, job)
+        if not sources.any:
+            raise ValueError(_nothing(sources))
 
-        toolbox = ToolBox(self._store, video, VideoMemory(self._store, video, self._embedder))
+        toolbox = ToolBox(
+            self._store,
+            video,
+            VideoMemory(self._store, video, self._embedder),
+            tools=sources.tools,
+        )
         report(0.05, "生成计划")
         plan = make_plan(self._chat, job.question, toolbox.tools)
         self._log(job, plan.note)
+        if sources.limits:
+            self._log(job, "证据范围：" + "；".join(sources.limits))
 
         evidence = self._gather(job, toolbox, plan, report, cancelled)
         if not evidence:
             report(0.6, "没有检索到可用片段")
             self._log(job, "没有检索到可用片段")
             conclusion = Conclusion(
-                text=write_absence(self._chat, question=job.question), citations=()
+                text=write_absence(self._chat, question=job.question, limits=sources.limits),
+                citations=(),
             )
         else:
             report(0.6, "撰写结论")
@@ -70,14 +131,79 @@ class Answering:
                 question=job.question,
                 evidence=evidence,
                 duration_ms=video.media.duration_ms if video.media is not None else 0,
+                limits=sources.limits,
                 on_delta=self._delta(job),
             )
         report(0.95, "保存结论")
         answer = self._store.record_answer(
-            job.id, video.id, job.question, conclusion.text, self._model, conclusion.citations
+            job.id,
+            video.id,
+            job.question,
+            _disclosed(conclusion.text, sources.missing),
+            self._model,
+            conclusion.citations,
         )
         self._log(job, f"结论引用了 {len(answer.citations)} 处时间点")
         return answer
+
+    def _sources(self, video: VideoRecord, job: JobRecord) -> Sources:
+        """Inventory the evidence on disk and why a branch produced none.
+
+        A source is absent either because the file has no such track or because a
+        node of this job failed. Only the second kind enters ``missing``: the
+        conclusion discloses what was attempted, not what was never part of the
+        job.
+        """
+        tasks = {task.id: task for task in self._store.tasks_for_job(job.id)}
+        transcript = self._store.transcript(video.id)
+        scenes = self._store.scenes(video.id)
+        events = self._store.events(video.id)
+        spoken = transcript is not None and transcript.ready and transcript.segment_count > 0
+        limits: list[str] = []
+        missing: list[str] = []
+
+        if video.media is None:
+            reason = _with_cause("媒体信息不可用", _cause_of(tasks, "probe"))
+            limits.append(reason)
+            if _attempted(tasks, "probe"):
+                missing.append(reason)
+            return Sources(False, False, False, tuple(limits), tuple(missing))
+
+        if not spoken:
+            if video.media.audio_codec is None:
+                limits.append("该视频没有音轨，没有文字转录")
+            elif transcript is not None and transcript.ready:
+                limits.append("转录为空，没有可用台词")
+            elif transcript is not None and transcript.segment_count > 0:
+                reason = _with_cause("文字转录不完整", _cause_of(tasks, "transcribe"))
+                limits.append(reason)
+                missing.append(reason)
+            else:
+                reason = _with_cause("文字转录不可用", _cause_of(tasks, "transcribe"))
+                limits.append(reason)
+                if _attempted(tasks, "transcribe"):
+                    missing.append(reason)
+
+        if not scenes:
+            if video.media.video_codec is None:
+                limits.append("该视频没有画面，没有场景描述")
+            else:
+                reason = _with_cause("画面描述不可用", _cause_of(tasks, "vision"))
+                limits.append(reason)
+                if _attempted(tasks, "vision"):
+                    missing.append(reason)
+        elif _attempted(tasks, "vision"):
+            reason = _with_cause("画面描述不完整", _cause_of(tasks, "vision"))
+            limits.append(reason)
+            missing.append(reason)
+
+        return Sources(
+            spoken,
+            bool(scenes),
+            bool(events) and bool(scenes),
+            tuple(limits),
+            tuple(missing),
+        )
 
     def _gather(
         self,
@@ -118,3 +244,56 @@ class Answering:
         self._bus.publish(
             Event.stamp(EventKind.LOG_LINE, job_id=job.id, payload={"message": message})
         )
+
+
+def _attempted(tasks: Mapping[str, TaskRecord], name: str) -> bool:
+    """Whether this job ran the node and it did not succeed."""
+    task = tasks.get(name)
+    return task is not None and task.status is not TaskStatus.SUCCEEDED
+
+
+def _cause_of(tasks: Mapping[str, TaskRecord], name: str) -> str | None:
+    """The failure behind a node, or ``None`` when the node never ran or succeeded."""
+    task = tasks.get(name)
+    if task is None or task.status is TaskStatus.SUCCEEDED:
+        return None
+    return _cause(tasks, task)
+
+
+def _cause(tasks: Mapping[str, TaskRecord], task: TaskRecord) -> str | None:
+    """The first failure a node inherits from its ancestry, or its own error.
+
+    A skipped node records only that a dependency failed; walking back to the
+    failing ancestor turns "依赖未成功，已跳过" into the reason the user needs.
+    """
+    seen: set[str] = set()
+    pending = [task]
+    while pending:
+        current = pending.pop()
+        if current.id in seen:
+            continue
+        seen.add(current.id)
+        if current.status in (TaskStatus.FAILED, TaskStatus.CANCELED) and current.error:
+            return current.error
+        pending.extend(tasks[name] for name in current.depends_on if name in tasks)
+    return task.error
+
+
+def _with_cause(label: str, cause: str | None) -> str:
+    """Attach a failure message to the name of the source it cost."""
+    return f"{label}（{cause}）" if cause else label
+
+
+def _nothing(sources: Sources) -> str:
+    """The failure for a video with no citable source, naming each reason."""
+    detail = "；".join(sources.limits)
+    if not detail:
+        return "没有可用的转录或画面描述，无法作答"
+    return f"没有可用的转录或画面描述，无法作答：{detail}"
+
+
+def _disclosed(text: str, missing: Sequence[str]) -> str:
+    """Append the evidence gap, so a partial conclusion says what it lacks."""
+    if not missing:
+        return text
+    return f"{text.rstrip()}\n\n证据范围：本次作答有证据缺失——{'；'.join(missing)}。"

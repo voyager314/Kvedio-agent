@@ -25,8 +25,13 @@ class StubAnswerer:
 
     def answer(self, job, report, *, cancelled=None):
         transcript = self._store.transcript(job.video_id)
-        if transcript is None or not transcript.ready:
-            raise ValueError("没有可用的转录，无法作答")
+        if transcript is not None and transcript.ready:
+            quote, kind = self._quote, "transcript"
+        else:
+            scenes = self._store.scenes(job.video_id)
+            if not scenes:
+                raise ValueError("没有可用的转录或画面描述，无法作答")
+            quote, kind = scenes[0].description, "scene"
         report(0.5, "撰写结论")
         return self._store.record_answer(
             job.id,
@@ -34,7 +39,7 @@ class StubAnswerer:
             job.question,
             self._text,
             "stub",
-            (Citation(start_ms=0, end_ms=600, quote=self._quote),),
+            (Citation(start_ms=0, end_ms=600, quote=quote, kind=kind),),
         )
 
 

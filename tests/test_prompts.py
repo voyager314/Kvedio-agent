@@ -28,7 +28,7 @@ def test_the_plan_lists_every_tool_with_its_arguments():
 
 def test_the_answer_carries_question_duration_and_evidence():
     text = prompts.render(
-        "answer", question="预算够吗", evidence=EVIDENCE, duration_ms=20_000
+        "answer", question="预算够吗", evidence=EVIDENCE, duration_ms=20_000, limits=()
     )
 
     assert "预算够吗" in text
@@ -37,12 +37,24 @@ def test_the_answer_carries_question_duration_and_evidence():
 
 
 def test_the_answer_binds_the_reply_to_the_question_language():
-    text = prompts.render("answer", question="q", evidence=EVIDENCE, duration_ms=0)
+    text = prompts.render("answer", question="q", evidence=EVIDENCE, duration_ms=0, limits=())
     assert "language of the question" in text.lower()
 
 
+def test_the_answer_names_unavailable_evidence():
+    text = prompts.render(
+        "answer",
+        question="q",
+        evidence=EVIDENCE,
+        duration_ms=0,
+        limits=("画面描述不可用（视觉模型失败）",),
+    )
+    assert "Evidence not available" in text
+    assert "画面描述不可用（视觉模型失败）" in text
+
+
 def test_the_absence_prompt_binds_the_language_too():
-    text = prompts.render("no_evidence", question="what did they decide")
+    text = prompts.render("no_evidence", question="what did they decide", limits=())
     assert "language of the question" in text.lower()
 
 
@@ -61,7 +73,7 @@ def test_the_repair_says_so_when_nothing_was_cited():
 
 
 def test_one_timestamp_format_is_shared_by_prompt_and_parser():
-    text = prompts.render("answer", question="q", evidence=EVIDENCE, duration_ms=0)
+    text = prompts.render("answer", question="q", evidence=EVIDENCE, duration_ms=0, limits=())
     assert citations.find(text), "the prompt must show a citation the parser accepts"
 
     shown = text.split("for example ")[1].split(".")[0]
@@ -70,7 +82,9 @@ def test_one_timestamp_format_is_shared_by_prompt_and_parser():
 
 
 def test_the_moment_filter_matches_the_parser_format():
-    text = prompts.render("answer", question="q", evidence=EVIDENCE, duration_ms=3_725_000)
+    text = prompts.render(
+        "answer", question="q", evidence=EVIDENCE, duration_ms=3_725_000, limits=()
+    )
     assert format_moment(3_725_000) in text
 
 

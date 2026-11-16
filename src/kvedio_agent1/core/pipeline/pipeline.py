@@ -5,9 +5,10 @@ supervisor and the scheduler. Both entry points block, so they belong on a worke
 thread: ``submit`` while hashing the file, ``run`` until every node is terminal.
 
 The graph holds only the nodes whose output is missing. Referencing a file for
-the first time runs probe, audio and transcription; asking a second question
-about the same file runs the answer alone, because the transcript is already
-there.
+the first time runs probe, then two branches that read the source independently:
+audio, transcription and memory on one side, scene description and events on the
+other. Asking a second question about the same file runs the answer alone,
+because both branches are already there.
 
 Does not render, does not parse command syntax, and does not decide how a file
 should be analysed: the interface hands over an absolute path and the user's own
@@ -24,7 +25,15 @@ from typing import Protocol
 
 from ..asr import AsrStage
 from ..config.schema import RuntimeLimits
-from ..domain import Answer, Event, EventKind, JobRecord, NewTask, VideoRecord
+from ..domain import (
+    Answer,
+    DependencyMode,
+    Event,
+    EventKind,
+    JobRecord,
+    NewTask,
+    VideoRecord,
+)
 from ..media import extract_audio, identify, probe
 from ..memory import MemoryBuilder
 from ..storage import Storage, StorageError
@@ -136,36 +145,65 @@ class Pipeline:
         return True
 
     def _graph_for(self, video: VideoRecord) -> tuple[NewTask, ...]:
-        """The nodes whose output is missing, chained in the order they run."""
+        """The nodes whose output is missing, wired as two branches that meet at the answer.
+
+        Transcription and picture description read the same file and neither
+        consumes the other's output, so they hang from the probe as separate
+        branches. The answer joins the last node of each branch under
+        ``PARTIAL``: a branch that failed costs its evidence, not the conclusion.
+        """
         tasks: list[NewTask] = []
+        source: tuple[str, ...] = ()
         if video.media is None:
             tasks.append(NewTask(id="probe", agent="media", action="probe"))
-        if self._needs_audio(video):
-            tasks.append(
-                NewTask(id="audio", agent="media", action="extract_audio", depends_on=_tail(tasks))
-            )
-        transcript_needed = self._needs_transcript(video)
-        if transcript_needed:
-            tasks.append(
-                NewTask(id="transcribe", agent="asr", action="transcribe", depends_on=_tail(tasks))
-            )
-        if self._needs_memory(video, after_transcript=transcript_needed):
-            tasks.append(
-                NewTask(id="memory", agent="memory", action="build", depends_on=_tail(tasks))
-            )
-        vision_needed = self._needs_vision(video)
-        if vision_needed:
-            tasks.append(
-                NewTask(id="vision", agent="vision", action="describe", depends_on=_tail(tasks))
-            )
-        if self._needs_events(video, after_vision=vision_needed):
-            tasks.append(
-                NewTask(id="events", agent="events", action="extract", depends_on=_tail(tasks))
-            )
+            source = ("probe",)
+        spoken = self._spoken_branch(video, source, tasks)
+        seen = self._visual_branch(video, source, tasks)
         tasks.append(
-            NewTask(id="answer", agent="supervisor", action="answer", depends_on=_tail(tasks))
+            NewTask(
+                id="answer",
+                agent="supervisor",
+                action="answer",
+                depends_on=_join(spoken, seen),
+                dependency_mode=DependencyMode.PARTIAL,
+            )
         )
         return tuple(tasks)
+
+    def _spoken_branch(
+        self, video: VideoRecord, source: tuple[str, ...], tasks: list[NewTask]
+    ) -> tuple[str, ...]:
+        """Append the audio, transcript and memory nodes; return the branch's last node."""
+        tail = source
+        if self._needs_audio(video):
+            tasks.append(
+                NewTask(id="audio", agent="media", action="extract_audio", depends_on=tail)
+            )
+            tail = ("audio",)
+        transcribe = self._needs_transcript(video)
+        if transcribe:
+            tasks.append(
+                NewTask(id="transcribe", agent="asr", action="transcribe", depends_on=tail)
+            )
+            tail = ("transcribe",)
+        if self._needs_memory(video, after_transcript=transcribe):
+            tasks.append(NewTask(id="memory", agent="memory", action="build", depends_on=tail))
+            tail = ("memory",)
+        return tail
+
+    def _visual_branch(
+        self, video: VideoRecord, source: tuple[str, ...], tasks: list[NewTask]
+    ) -> tuple[str, ...]:
+        """Append the scene and event nodes; return the branch's last node."""
+        tail = source
+        vision = self._needs_vision(video)
+        if vision:
+            tasks.append(NewTask(id="vision", agent="vision", action="describe", depends_on=tail))
+            tail = ("vision",)
+        if self._needs_events(video, after_vision=vision):
+            tasks.append(NewTask(id="events", agent="events", action="extract", depends_on=tail))
+            tail = ("events",)
+        return tail
 
     def _needs_audio(self, video: VideoRecord) -> bool:
         if video.media is not None and video.media.audio_codec is None:
@@ -315,11 +353,8 @@ class Pipeline:
         context.report(1.0)
 
     def _answer(self, context: TaskContext) -> None:
-        """Answer from the transcript, citing only the moments retrieval returned."""
+        """Answer from whatever evidence the video produced, naming any gap in the conclusion."""
         context.raise_if_cancelled()
-        video = self._video(context)
-        if video.media is not None and video.media.audio_codec is None:
-            raise ValueError("该视频没有音轨，无法作答")
         answering = self._stages.answering
         if answering is None:
             raise ValueError("未配置对话模型：supervisor")
@@ -345,6 +380,6 @@ class Pipeline:
         )
 
 
-def _tail(tasks: list[NewTask]) -> tuple[str, ...]:
-    """The node just added, which the next one depends on; empty for the first."""
-    return (tasks[-1].id,) if tasks else ()
+def _join(*tails: tuple[str, ...]) -> tuple[str, ...]:
+    """The distinct last nodes of the branches, which the answer waits for."""
+    return tuple(dict.fromkeys(name for tail in tails for name in tail))

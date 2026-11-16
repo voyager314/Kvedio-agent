@@ -1,4 +1,5 @@
 import queue
+import threading
 from pathlib import Path
 
 import pytest
@@ -235,6 +236,26 @@ def test_a_partial_dependency_runs_after_every_upstream_settles(store, bus):
     assert ran == ["answer"]
     assert finished.status is JobStatus.PARTIAL
     assert "转录失败" in finished.error
+
+
+def test_independent_nodes_run_at_the_same_time(store, bus):
+    job = prepare(
+        store,
+        [
+            NewTask(id="asr", agent="asr", action="x"),
+            NewTask(id="video", agent="video", action="y"),
+        ],
+    )
+    barrier = threading.Barrier(2, timeout=5)
+
+    def meet(context):
+        barrier.wait()
+
+    finished = Scheduler(store, bus, max_workers=2).run(
+        job, {"asr": meet, "video": meet}
+    )
+
+    assert finished.status is JobStatus.SUCCEEDED
 
 
 def test_progress_never_moves_backwards(store, bus):

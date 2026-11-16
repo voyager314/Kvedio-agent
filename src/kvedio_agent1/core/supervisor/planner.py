@@ -44,7 +44,7 @@ def make_plan(
     reply = chat.complete([Message(role="system", content=message)], json_mode=True)
     steps = _parse(reply.text, frozenset(tool.name for tool in tools), max_steps)
     if not steps:
-        return Plan(_fallback(question), "计划不可用，改用固定检索")
+        return Plan(_fallback(question, tools), "计划不可用，改用固定检索")
     return Plan(steps, f"按计划执行 {len(steps)} 步")
 
 
@@ -83,13 +83,22 @@ def _json_object(text: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _fallback(question: str) -> tuple[Step, ...]:
+def _fallback(question: str, tools: Sequence[Tool]) -> tuple[Step, ...]:
     """The plan used when the model's plan cannot be read: look wide, then look for the question.
 
-    No ``why`` is attached: these steps are ours, not the model's, and the tool's
-    own note is a truthful trace.
+    Only tools the box offered are considered, so a recording with pictures but
+    no words does not spend a step on a transcript lookup. No ``why`` is attached:
+    these steps are ours, not the model's, and the tool's own note is a truthful
+    trace.
     """
-    return (
-        Step(tool="overview", arguments={}),
-        Step(tool="search", arguments={"query": question[:40]}),
-    )
+    names = {tool.name for tool in tools}
+    steps: list[Step] = []
+    if "overview" in names:
+        steps.append(Step(tool="overview", arguments={}))
+    if "search" in names:
+        steps.append(Step(tool="search", arguments={"query": question[:40]}))
+    if not steps and "scenes" in names:
+        steps.append(Step(tool="scenes", arguments={}))
+    if not steps and "events" in names:
+        steps.append(Step(tool="events", arguments={}))
+    return tuple(steps)
