@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from kvedio_agent1.core.domain import Segment
-from kvedio_agent1.core.llm import Transcriber, TranscriptionError
+from kvedio_agent1.core.llm import ModelError, Transcriber
 
 URL = "https://asr.example.invalid/v1/audio/transcriptions"
 KEY = "sk-live-do-not-print"
@@ -87,7 +87,7 @@ def test_a_rejected_request_is_not_retried_and_hides_the_key(audio):
         attempts.append(1)
         return httpx.Response(400, json={"error": {"message": "unsupported format"}})
 
-    with pytest.raises(TranscriptionError) as failure:
+    with pytest.raises(ModelError) as failure:
         build(handler).transcribe(audio)
     message = str(failure.value)
     assert len(attempts) == 1
@@ -103,7 +103,7 @@ def test_an_unreachable_endpoint_is_reported_after_the_last_attempt(audio):
         attempts.append(1)
         raise httpx.ConnectError("refused")
 
-    with pytest.raises(TranscriptionError, match="未送达"):
+    with pytest.raises(ModelError, match="未送达"):
         build(handler, attempts=2, sleep=lambda _: None).transcribe(audio)
     assert len(attempts) == 2
 
@@ -112,7 +112,7 @@ def test_an_answer_without_segments_is_refused(audio):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"text": "whole transcript"})
 
-    with pytest.raises(TranscriptionError, match="segments"):
+    with pytest.raises(ModelError, match="segments"):
         build(handler).transcribe(audio)
 
 
@@ -120,7 +120,7 @@ def test_a_segment_without_timing_is_refused(audio):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"segments": [{"text": "no timing"}]})
 
-    with pytest.raises(TranscriptionError, match="时间戳"):
+    with pytest.raises(ModelError, match="时间戳"):
         build(handler).transcribe(audio)
 
 
@@ -141,6 +141,6 @@ def test_json_bodies_are_not_echoed_into_errors(audio):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, content=json.dumps({"error": "boom"}).encode())
 
-    with pytest.raises(TranscriptionError) as failure:
+    with pytest.raises(ModelError) as failure:
         build(handler, attempts=1).transcribe(audio)
     assert "boom" in str(failure.value)
