@@ -132,3 +132,23 @@ def _write_video(target: Path, *, with_audio: bool) -> None:
     for packet in trailing:
         container.mux(packet)
     container.close()
+
+@pytest.fixture(scope="session")
+def two_shot_video(tmp_path_factory) -> Path:
+    """Two seconds, two solid colours: one cut at 1 s, for scene detection."""
+    target = tmp_path_factory.mktemp("media") / "two-shot.mp4"
+    container = av.open(str(target), "w")
+    stream = container.add_stream("libx264", rate=20)
+    stream.width, stream.height, stream.pix_fmt = 160, 120, "yuv420p"
+    for index in range(40):
+        frame = av.VideoFrame(160, 120, "yuv420p")
+        shade = 60 if index < 20 else 200
+        for plane in frame.planes:
+            plane.update(bytes([shade]) * plane.buffer_size)
+        frame.pts = index
+        for packet in stream.encode(frame):
+            container.mux(packet)
+    for packet in stream.encode(None):
+        container.mux(packet)
+    container.close()
+    return target
