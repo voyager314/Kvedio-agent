@@ -98,7 +98,7 @@ class Workbench(App[None]):
         border: round $primary;
     }
     #timeline {
-        height: 5;
+        height: 6;
         border: round $primary;
         padding: 0 1;
     }
@@ -301,13 +301,31 @@ class Workbench(App[None]):
         video = self._latest_video()
         if video is None:
             panel.update("时间轴：尚未引用视频")
-        elif video.media is None:
+            return
+        if video.media is None:
             panel.update(f"时间轴：{video.path.name}（时长未知，等待探测）")
-        else:
-            panel.update(
-                f"时间轴：00:00:00 ────────────── {format_duration(video.media.duration_ms)}\n"
-                f"{format_size(video.size_bytes)}　·　转录与场景标记将在后续阶段填充"
-            )
+            return
+        lines = [
+            f"时间轴：00:00:00 ────────────── {format_duration(video.media.duration_ms)}",
+            f"{format_size(video.size_bytes)}　·　{format_container(video.media.container)}",
+            self._transcript_line(video),
+        ]
+        panel.update("\n".join(lines))
+
+    def _transcript_line(self, video: VideoRecord) -> str:
+        """How much of the recording has words in the store, or why it has none."""
+        if video.media is not None and video.media.audio_codec is None:
+            return "转录：无音轨"
+        transcript = self._store.transcript(video.id)
+        if transcript is None:
+            return "转录：尚无"
+        if not transcript.ready:
+            return "转录：进行中"
+        if transcript.segment_count == 0:
+            return f"转录：{transcript.model}　无语音"
+        first = format_duration(transcript.first_ms or 0)
+        last = format_duration(transcript.last_ms or 0)
+        return f"转录：{transcript.segment_count} 段 · {first}–{last} · {transcript.model}"
 
     def _render_evidence(self) -> None:
         panel = self.query_one("#evidence", Static)

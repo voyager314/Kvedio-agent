@@ -38,5 +38,9 @@ runtime:
   max_global_workers: 6
   # 单次上游调用的超时，单位秒。
   request_timeout_seconds: 120
+  # 单次转写请求承载的音频长度，单位秒。
+  asr_chunk_seconds: 300
+  # 同时发出的转写请求数。
+  asr_concurrency: 2
   # 产物目录；null 表示 ~/.kvedio_agent/workspace。
   workspace_dir: null

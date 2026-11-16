@@ -36,6 +36,8 @@ def test_first_load_creates_the_packaged_template(home):
     assert loaded.config.for_role(Role.ASR).model == "qwen3-asr-flash"
     assert loaded.config.for_role(Role.VIDEO).url.endswith("/chat/completions")
     assert loaded.config.runtime.max_global_workers == 6
+    assert loaded.config.runtime.asr_chunk_seconds == 300
+    assert loaded.config.runtime.asr_concurrency == 2
 
 
 def test_second_load_leaves_the_user_file_alone(home):

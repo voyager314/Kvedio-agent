@@ -12,17 +12,23 @@ import argparse
 import sys
 from collections.abc import Sequence
 
+from ..core.asr import AsrStage
 from ..core.config import (
+    AppConfig,
     ConfigError,
     Role,
     database_path,
+    home_dir,
     is_usable,
     load_or_create,
+    resolved_api_key,
 )
+from ..core.llm import Transcriber
 from ..core.media import decoder_version
 from ..core.pipeline import Pipeline
 from ..core.storage import Storage, StorageError
 from ..core.tasks import EventBus
+from ..core.workspace import Workspace
 from .tui import Workbench
 from .tui.format import role_label
 
@@ -56,11 +62,48 @@ def _workbench() -> int:
     try:
         store.abandon_interrupted()
         bus = EventBus()
-        pipeline = Pipeline(store, bus, loaded.config.runtime)
+        workspace = Workspace(
+            loaded.config.runtime.workspace_dir or home_dir() / "workspace"
+        )
+        pipeline = Pipeline(
+            store,
+            bus,
+            loaded.config.runtime,
+            workspace,
+            _asr_stage(loaded.config, store, workspace),
+        )
         Workbench(loaded, store, pipeline, bus).run()
     finally:
         store.close()
     return 0
+
+
+def _asr_stage(config: AppConfig, store: Storage, workspace: Workspace) -> AsrStage | None:
+    """Build the transcription stage from the configured role.
+
+    Returns ``None`` when the role has no model or no usable key: the job then
+    fails at transcription with a message naming the missing piece, rather than
+    silently producing a video without words.
+    """
+    binding = config.asr
+    key = resolved_api_key(binding) if binding is not None else None
+    if binding is None or key is None:
+        return None
+    transcriber = Transcriber(
+        url=binding.url,
+        api_key=key,
+        model=binding.model,
+        timeout=config.runtime.request_timeout_seconds,
+    )
+    return AsrStage(
+        store,
+        workspace,
+        transcriber.transcribe,
+        model=binding.model,
+        address=binding.url,
+        chunk_ms=config.runtime.asr_chunk_seconds * 1000,
+        concurrency=config.runtime.asr_concurrency,
+    )
 
 
 def _show_config() -> int:

@@ -75,6 +75,8 @@ class RuntimeLimits(BaseModel):
     retention_days: int = Field(default=30, ge=0)
     max_global_workers: int = Field(default=6, ge=1, le=64)
     request_timeout_seconds: int = Field(default=120, gt=0)
+    asr_chunk_seconds: int = Field(default=300, ge=10, le=1800)
+    asr_concurrency: int = Field(default=2, ge=1, le=16)
     workspace_dir: Path | None = None
 
 
