@@ -10,10 +10,12 @@ from .job import (
     TaskRecord,
     TaskStatus,
 )
+from .transcript import Chunk, Segment, Transcript
 from .video import FileIdentity, MediaInfo, VideoRecord
 
 __all__ = [
     "TERMINAL",
+    "Chunk",
     "DependencyMode",
     "Event",
     "EventKind",
@@ -22,7 +24,9 @@ __all__ = [
     "JobStatus",
     "MediaInfo",
     "NewTask",
+    "Segment",
     "TaskRecord",
     "TaskStatus",
+    "Transcript",
     "VideoRecord",
 ]

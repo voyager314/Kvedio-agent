@@ -1,7 +1,9 @@
-"""The SQLite schema and the migration that reaches it.
+"""The SQLite schema and the migrations that reach it.
 
 The schema version lives in SQLite's own ``user_version`` header, so opening a
-database written by a newer build is detectable before any row is touched.
+database written by a newer build is detectable before any row is touched. Each
+migration is applied in order, which lets an older file catch up without a
+migration framework.
 """
 
 from __future__ import annotations
@@ -10,9 +12,9 @@ import sqlite3
 
 from .errors import StorageError
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-_DDL = """
+_INITIAL = """
 CREATE TABLE video (
     id            INTEGER PRIMARY KEY,
     path          TEXT    NOT NULL,
@@ -61,6 +63,40 @@ CREATE TABLE task (
 );
 """
 
+_TRANSCRIPT = """
+CREATE TABLE transcript (
+    id           INTEGER PRIMARY KEY,
+    video_id     INTEGER NOT NULL UNIQUE REFERENCES video(id),
+    cache_key    TEXT    NOT NULL,
+    model        TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL,
+    completed_at TEXT
+);
+
+CREATE TABLE transcript_segment (
+    id            INTEGER PRIMARY KEY,
+    transcript_id INTEGER NOT NULL REFERENCES transcript(id),
+    start_ms      INTEGER NOT NULL,
+    end_ms        INTEGER NOT NULL,
+    text          TEXT    NOT NULL
+);
+
+CREATE INDEX idx_segment_transcript ON transcript_segment(transcript_id, start_ms);
+
+CREATE TABLE checkpoint (
+    video_id    INTEGER NOT NULL REFERENCES video(id),
+    stage       TEXT    NOT NULL,
+    cache_key   TEXT    NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    start_ms    INTEGER NOT NULL,
+    end_ms      INTEGER NOT NULL,
+    created_at  TEXT    NOT NULL,
+    PRIMARY KEY (video_id, stage, cache_key, chunk_index)
+);
+"""
+
+_MIGRATIONS: dict[int, str] = {1: _INITIAL, 2: _TRANSCRIPT}
+
 
 def migrate(connection: sqlite3.Connection) -> None:
     """Bring the file to ``SCHEMA_VERSION``.
@@ -76,7 +112,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         )
     if version == SCHEMA_VERSION:
         return
-    if version < 1:
-        connection.executescript(_DDL)
+    for target in range(version + 1, SCHEMA_VERSION + 1):
+        connection.executescript(_MIGRATIONS[target])
     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     connection.commit()

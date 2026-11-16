@@ -18,13 +18,16 @@ from pathlib import Path
 from uuid import uuid4
 
 from ..domain import (
+    Chunk,
     DependencyMode,
     JobRecord,
     JobStatus,
     MediaInfo,
     NewTask,
+    Segment,
     TaskRecord,
     TaskStatus,
+    Transcript,
     VideoRecord,
 )
 from .errors import StorageError
@@ -241,6 +244,116 @@ class Storage:
             if cursor.rowcount == 0:
                 raise StorageError(f"任务不存在：{task.job_id}/{task.id}")
 
+    def transcript(self, video_id: int) -> Transcript | None:
+        """The transcript of one video with its aggregates, or ``None`` when there is none."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT t.id, t.video_id, t.cache_key, t.model, t.created_at, t.completed_at,"
+                " COUNT(s.id) AS segment_count, MIN(s.start_ms) AS first_ms,"
+                " MAX(s.end_ms) AS last_ms"
+                " FROM transcript t LEFT JOIN transcript_segment s ON s.transcript_id = t.id"
+                " WHERE t.video_id = ? GROUP BY t.id",
+                (video_id,),
+            ).fetchone()
+        return _transcript(row) if row is not None else None
+
+    def open_transcript(
+        self, video_id: int, cache_key: str, model: str, stage: str
+    ) -> Transcript:
+        """Return the transcript being written for this key, discarding one built under another.
+
+        A video has one transcript. A different key means the earlier result came
+        from inputs that no longer apply — another model, another chunk length —
+        so its segments and this stage's checkpoints are dropped rather than mixed
+        into the new run. The same key resumes, keeping whatever was written.
+        """
+        moment = _instant(_now())
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT id, cache_key FROM transcript WHERE video_id = ?", (video_id,)
+            ).fetchone()
+            if row is not None and row["cache_key"] != cache_key:
+                self._connection.execute(
+                    "DELETE FROM transcript_segment WHERE transcript_id = ?", (row["id"],)
+                )
+                self._connection.execute("DELETE FROM transcript WHERE id = ?", (row["id"],))
+                self._connection.execute(
+                    "DELETE FROM checkpoint WHERE video_id = ? AND stage = ?", (video_id, stage)
+                )
+                row = None
+            if row is None:
+                self._connection.execute(
+                    "INSERT INTO transcript (video_id, cache_key, model, created_at)"
+                    " VALUES (?, ?, ?, ?)",
+                    (video_id, cache_key, model, moment),
+                )
+        found = self.transcript(video_id)
+        if found is None:
+            raise StorageError(f"转录无法建立：视频 {video_id}")
+        return found
+
+    def save_chunk(
+        self,
+        transcript_id: int,
+        video_id: int,
+        stage: str,
+        cache_key: str,
+        chunk: Chunk,
+        segments: Sequence[Segment],
+    ) -> None:
+        """Write one chunk's segments and its completion marker as one transaction.
+
+        Segments overlapping the chunk's interval are removed first, so a chunk
+        transcribed twice leaves one copy rather than two, and a crash between the
+        model call and the marker replays cleanly.
+        """
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM transcript_segment WHERE transcript_id = ?"
+                " AND start_ms < ? AND end_ms > ?",
+                (transcript_id, chunk.end_ms, chunk.start_ms),
+            )
+            self._connection.executemany(
+                "INSERT INTO transcript_segment (transcript_id, start_ms, end_ms, text)"
+                " VALUES (?, ?, ?, ?)",
+                [
+                    (transcript_id, segment.start_ms, segment.end_ms, segment.text)
+                    for segment in segments
+                ],
+            )
+            self._connection.execute(
+                "INSERT OR REPLACE INTO checkpoint"
+                " (video_id, stage, cache_key, chunk_index, start_ms, end_ms, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    video_id,
+                    stage,
+                    cache_key,
+                    chunk.index,
+                    chunk.start_ms,
+                    chunk.end_ms,
+                    _instant(_now()),
+                ),
+            )
+
+    def completed_chunks(self, video_id: int, stage: str, cache_key: str) -> set[int]:
+        """Indices of the chunks already written under this key."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT chunk_index FROM checkpoint"
+                " WHERE video_id = ? AND stage = ? AND cache_key = ?",
+                (video_id, stage, cache_key),
+            ).fetchall()
+        return {row["chunk_index"] for row in rows}
+
+    def finish_transcript(self, transcript_id: int) -> None:
+        """Mark the transcript complete; until then it is not cited anywhere."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE transcript SET completed_at = ? WHERE id = ?",
+                (_instant(_now()), transcript_id),
+            )
+
     def abandon_interrupted(self) -> list[str]:
         """Fail every job an earlier process left running, together with its unfinished nodes.
 
@@ -341,6 +454,20 @@ def _job(row: sqlite3.Row) -> JobRecord:
         started_at=_moment(row["started_at"]) if row["started_at"] else None,
         finished_at=_moment(row["finished_at"]) if row["finished_at"] else None,
         error=row["error"],
+    )
+
+
+def _transcript(row: sqlite3.Row) -> Transcript:
+    return Transcript(
+        id=row["id"],
+        video_id=row["video_id"],
+        cache_key=row["cache_key"],
+        model=row["model"],
+        segment_count=row["segment_count"],
+        first_ms=row["first_ms"],
+        last_ms=row["last_ms"],
+        created_at=_moment(row["created_at"]),
+        completed_at=_moment(row["completed_at"]) if row["completed_at"] else None,
     )
 
 

@@ -6,10 +6,12 @@ from pathlib import Path
 import pytest
 
 from kvedio_agent1.core.domain import (
+    Chunk,
     DependencyMode,
     JobStatus,
     MediaInfo,
     NewTask,
+    Segment,
     TaskStatus,
 )
 from kvedio_agent1.core.storage import Storage, StorageError
@@ -169,3 +171,81 @@ def test_a_newer_schema_is_not_opened(tmp_path):
     connection.close()
     with pytest.raises(StorageError, match="版本"):
         Storage(path)
+
+
+def test_a_transcript_is_created_once_per_key(store, tmp_path):
+    video = reference(store, tmp_path)
+    first = store.open_transcript(video.id, "key-1", "model", "transcribe")
+    again = store.open_transcript(video.id, "key-1", "model", "transcribe")
+    assert first.id == again.id
+    assert first.ready is False
+
+
+def test_a_different_key_replaces_the_previous_transcript(store, tmp_path):
+    video = reference(store, tmp_path)
+    transcript = store.open_transcript(video.id, "key-1", "model", "transcribe")
+    store.save_chunk(
+        transcript.id,
+        video.id,
+        "transcribe",
+        "key-1",
+        Chunk(index=0, start_ms=0, end_ms=1_000),
+        [Segment(start_ms=0, end_ms=500, text="旧内容")],
+    )
+    store.finish_transcript(transcript.id)
+
+    fresh = store.open_transcript(video.id, "key-2", "model", "transcribe")
+
+    assert fresh.cache_key == "key-2"
+    assert fresh.segment_count == 0
+    assert fresh.ready is False
+    assert store.completed_chunks(video.id, "transcribe", "key-1") == set()
+
+
+def test_writing_the_same_chunk_twice_leaves_one_copy(store, tmp_path):
+    video = reference(store, tmp_path)
+    transcript = store.open_transcript(video.id, "key", "model", "transcribe")
+    chunk = Chunk(index=0, start_ms=0, end_ms=2_000)
+
+    store.save_chunk(
+        transcript.id,
+        video.id,
+        "transcribe",
+        "key",
+        chunk,
+        [Segment(start_ms=0, end_ms=900, text="第一次")],
+    )
+    store.save_chunk(
+        transcript.id,
+        video.id,
+        "transcribe",
+        "key",
+        chunk,
+        [Segment(start_ms=0, end_ms=900, text="第二次")],
+    )
+
+    assert store.transcript(video.id).segment_count == 1
+    assert store.completed_chunks(video.id, "transcribe", "key") == {0}
+
+
+def test_a_transcript_summarises_its_segments(store, tmp_path):
+    video = reference(store, tmp_path)
+    transcript = store.open_transcript(video.id, "key", "model", "transcribe")
+    store.save_chunk(
+        transcript.id,
+        video.id,
+        "transcribe",
+        "key",
+        Chunk(index=0, start_ms=0, end_ms=3_000),
+        [
+            Segment(start_ms=100, end_ms=500, text="一"),
+            Segment(start_ms=1_500, end_ms=2_400, text="二"),
+        ],
+    )
+    store.finish_transcript(transcript.id)
+
+    summary = store.transcript(video.id)
+    assert summary.segment_count == 2
+    assert summary.first_ms == 100
+    assert summary.last_ms == 2_400
+    assert summary.ready is True
