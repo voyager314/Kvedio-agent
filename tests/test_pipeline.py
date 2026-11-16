@@ -6,7 +6,7 @@ import pytest
 from kvedio_agent1.core.asr import AsrStage
 from kvedio_agent1.core.config.schema import RuntimeLimits
 from kvedio_agent1.core.domain import Event, EventKind, JobStatus, Segment, TaskStatus
-from kvedio_agent1.core.pipeline import Pipeline
+from kvedio_agent1.core.pipeline import Pipeline, Stages
 from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.core.tasks import EventBus
 from kvedio_agent1.core.workspace import Workspace
@@ -28,7 +28,7 @@ def spoken(audio: Path) -> list[Segment]:
     return [Segment(start_ms=0, end_ms=500, text="开场")]
 
 
-def build(store: Storage, workspace: Workspace, transcribe=spoken, **runtime):
+def build(store, workspace, answering, transcribe=spoken, **runtime):
     bus = EventBus()
     asr = None
     if transcribe is not None:
@@ -41,7 +41,13 @@ def build(store: Storage, workspace: Workspace, transcribe=spoken, **runtime):
             chunk_ms=300_000,
             concurrency=1,
         )
-    return Pipeline(store, bus, RuntimeLimits(**runtime), workspace, asr), bus
+    stages = Stages(
+        runtime=RuntimeLimits(**runtime),
+        workspace=workspace,
+        asr=asr,
+        answering=answering,
+    )
+    return Pipeline(store, bus, stages), bus
 
 
 def drain(channel: queue.Queue[Event]) -> list[Event]:
@@ -51,51 +57,61 @@ def drain(channel: queue.Queue[Event]) -> list[Event]:
     return collected
 
 
-def test_referencing_a_missing_file_leaves_no_trace(store, workspace, tmp_path):
-    pipeline, _ = build(store, workspace)
+def test_referencing_a_missing_file_leaves_no_trace(store, workspace, answerer, tmp_path):
+    pipeline, _ = build(store, workspace, answerer)
     with pytest.raises(OSError):
         pipeline.submit(tmp_path / "gone.mp4", "讲了什么")
     assert store.videos() == []
 
 
-def test_a_reference_is_probed_transcribed_and_succeeds(store, workspace, sample_video):
-    pipeline, bus = build(store, workspace)
+def test_a_reference_is_probed_transcribed_answered(store, workspace, answerer, sample_video):
+    pipeline, bus = build(store, workspace, answerer)
     channel = bus.subscribe()
     job = pipeline.submit(sample_video, "讲了什么")
 
     finished = pipeline.run(job)
 
-    assert finished.status is JobStatus.SUCCEEDED
+    assert finished.status is JobStatus.SUCCEEDED, finished.error
     video = store.video(job.video_id)
     assert video.media is not None
     assert video.media.video_codec == "h264"
-    assert workspace.audio_path(video.id).exists()
-    transcript = store.transcript(video.id)
-    assert transcript is not None
-    assert transcript.ready is True
-    assert transcript.segment_count == 1
-    assert all(
-        task.status is TaskStatus.SUCCEEDED for task in store.tasks_for_job(job.id)
-    )
+    assert workspace.audio(video.id).exists()
+    assert store.transcript(video.id).ready is True
+    answer = store.answer(job.id)
+    assert answer is not None
+    assert answer.citations[0].quote == "开场白"
+    assert [task.id for task in store.tasks_for_job(job.id)] == [
+        "probe",
+        "audio",
+        "transcribe",
+        "answer",
+    ]
+    assert all(task.status is TaskStatus.SUCCEEDED for task in store.tasks_for_job(job.id))
     kinds = [event.kind for event in drain(channel)]
     assert kinds[0] is EventKind.JOB_QUEUED
     assert EventKind.VIDEO_REGISTERED in kinds
     assert kinds[-1] is EventKind.JOB_SUCCEEDED
 
 
-def test_a_second_reference_reuses_the_video_row(store, workspace, sample_video):
-    pipeline, _ = build(store, workspace)
+def test_a_second_question_reuses_every_finished_stage(store, workspace, answerer, sample_video):
+    pipeline, _ = build(store, workspace, answerer)
     first = pipeline.submit(sample_video, "第一个问题")
+    pipeline.run(first)
+
     second = pipeline.submit(sample_video, "第二个问题")
+    finished = pipeline.run(second)
+
     assert first.video_id == second.video_id
     assert len(store.videos()) == 1
-    assert len(store.jobs()) == 2
+    assert [task.id for task in store.tasks_for_job(second.id)] == ["answer"]
+    assert finished.status is JobStatus.SUCCEEDED
+    assert store.answer(second.id) is not None
 
 
-def test_a_file_that_is_not_media_fails_the_job(store, workspace, tmp_path):
+def test_a_file_that_is_not_media_fails_the_job(store, workspace, answerer, tmp_path):
     impostor = tmp_path / "notes.mp4"
     impostor.write_text("这不是视频", encoding="utf-8")
-    pipeline, _ = build(store, workspace)
+    pipeline, _ = build(store, workspace, answerer)
 
     finished = pipeline.run(pipeline.submit(impostor, "讲了什么"))
 
@@ -104,9 +120,9 @@ def test_a_file_that_is_not_media_fails_the_job(store, workspace, tmp_path):
 
 
 def test_a_recording_over_the_ceiling_is_refused_before_the_record_is_written(
-    store, workspace, sample_video
+    store, workspace, answerer, sample_video
 ):
-    pipeline, _ = build(store, workspace, max_video_duration_seconds=1)
+    pipeline, _ = build(store, workspace, answerer, max_video_duration_seconds=1)
 
     finished = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
 
@@ -115,8 +131,10 @@ def test_a_recording_over_the_ceiling_is_refused_before_the_record_is_written(
     assert store.video(finished.video_id).media is None
 
 
-def test_without_an_asr_model_the_job_stops_before_transcription(store, workspace, sample_video):
-    pipeline, _ = build(store, workspace, transcribe=None)
+def test_without_an_asr_model_the_job_stops_before_transcription(
+    store, workspace, answerer, sample_video
+):
+    pipeline, _ = build(store, workspace, answerer, transcribe=None)
 
     finished = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
 
@@ -125,19 +143,29 @@ def test_without_an_asr_model_the_job_stops_before_transcription(store, workspac
     assert tasks["audio"].status is TaskStatus.SUCCEEDED
     assert tasks["transcribe"].status is TaskStatus.FAILED
     assert "未配置语音模型" in tasks["transcribe"].error
+    assert store.answer(finished.id) is None
 
 
-def test_a_video_without_audio_finishes_without_a_transcript(store, workspace, silent_video):
-    pipeline, bus = build(store, workspace)
-    channel = bus.subscribe()
+def test_without_a_supervisor_the_job_stops_at_the_answer(store, workspace, sample_video):
+    pipeline, _ = build(store, workspace, answering=None)
+
+    finished = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
+
+    tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
+    assert finished.status is JobStatus.PARTIAL
+    assert tasks["transcribe"].status is TaskStatus.SUCCEEDED
+    assert tasks["answer"].status is TaskStatus.FAILED
+    assert "未配置对话模型" in tasks["answer"].error
+
+
+def test_a_video_without_audio_cannot_be_answered(store, workspace, answerer, silent_video):
+    pipeline, _ = build(store, workspace, answerer)
 
     finished = pipeline.run(pipeline.submit(silent_video, "讲了什么"))
 
-    assert finished.status is JobStatus.SUCCEEDED
+    assert finished.status is JobStatus.PARTIAL
+    assert "没有音轨" in finished.error
     assert store.transcript(finished.video_id) is None
-    messages = [
-        event.payload.get("message")
-        for event in drain(channel)
-        if event.kind is EventKind.LOG_LINE
-    ]
-    assert "没有音轨，跳过转录" in messages
+    tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
+    assert tasks["transcribe"].status is TaskStatus.SUCCEEDED  # nothing to transcribe
+    assert tasks["answer"].status is TaskStatus.FAILED

@@ -25,9 +25,13 @@ class Workspace:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def audio_path(self, video_id: int) -> Path:
-        """The prepared 16 kHz mono WAV for one video; its existence implies a complete write."""
-        return self.video_dir(video_id) / "audio.wav"
+    def audio(self, video_id: int) -> Path:
+        """Where the prepared WAV lives; a writer creates the directory, a reader only looks.
+
+        Existence means the file is complete: extraction writes elsewhere and
+        renames when the last sample is out.
+        """
+        return self.root / f"video_{video_id}" / "audio.wav"
 
     def scratch_dir(self, video_id: int) -> Path:
         """Space for files whose lifetime is one chunk; stages delete what they create."""

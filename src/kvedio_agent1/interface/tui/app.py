@@ -20,7 +20,17 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Header, Input, RichLog, Static
 
 from ...core.config import Loaded, Role, is_usable
-from ...core.domain import Event, EventKind, JobRecord, JobStatus, TaskRecord, VideoRecord
+from ...core.domain import (
+    Answer,
+    Citation,
+    Event,
+    EventKind,
+    JobRecord,
+    JobStatus,
+    TaskRecord,
+    VideoRecord,
+    format_moment,
+)
 from ...core.pipeline import Pipeline
 from ...core.storage import Storage
 from ...core.tasks import EventBus
@@ -41,6 +51,7 @@ HELP = """\
 /help              显示本说明
 /model             列出各角色的模型与端点
 @路径 问题         引用视频并分析，路径含空格加引号
+直接输入问题       就当前视频追问，结论带时间戳
 /quit              退出"""
 
 _TASK_COLUMNS = ("task", "agent", "action", "status", "progress")
@@ -164,10 +175,16 @@ class Workbench(App[None]):
         self.query_one("#prompt", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        submission = parse_submission(event.value, Path.cwd())
+        text = event.value.strip()
+        if not text:
+            return
+        if not text.startswith(("@", "/")):
+            event.input.value = ""
+            self._ask(text)
+            return
+        submission = parse_submission(text, Path.cwd())
         if submission is None:
-            if event.value.strip():
-                self._say(USAGE, style="yellow")
+            self._say(USAGE, style="yellow")
             return
         event.input.value = ""
         if isinstance(submission, Command):
@@ -184,14 +201,32 @@ class Workbench(App[None]):
                 job = self._pipeline.submit(reference.path, reference.question)
                 self._pipeline.run(job)
             except Exception as error:  # a dying worker must speak rather than vanish silently
-                self._bus.publish(
-                    Event.stamp(
-                        EventKind.LOG_LINE,
-                        payload={"message": f"无法处理 {reference.path.name}：{error}"},
-                    )
-                )
+                self._notify(f"无法处理 {reference.path.name}：{error}")
 
         self.run_worker(work, thread=True, group="reference")
+
+    def _ask(self, question: str) -> None:
+        """Ask the supervisor about the video on screen; the answer cites its transcript."""
+        if self._latest is None:
+            self._say("还没有引用视频：先用 @路径 问题 引用一个。", style="yellow")
+            return
+        video_id = self._latest.video_id
+        self._say(f"提问：{question}")
+
+        def work() -> None:
+            try:
+                job = self._pipeline.ask(video_id, question)
+                self._pipeline.run(job)
+            except Exception as error:
+                self._notify(f"作答中断：{error}")
+
+        self.run_worker(work, thread=True, group="answer")
+
+    def _notify(self, message: str) -> None:
+        """Hand one line from a worker to the interface thread; the only way a worker may speak."""
+        self._bus.publish(
+            Event.stamp(EventKind.LOG_LINE, payload={"message": message})
+        )
 
     def _pump(self) -> None:
         """Drain published events on the interface thread and render each one."""
@@ -283,8 +318,21 @@ class Workbench(App[None]):
         label = job_status_label(job.status)
         message = f"作业 {label}：{detail}" if detail else f"作业 {label}"
         self._say(message, style="bold red" if job.status is JobStatus.FAILED else "green")
+        self._announce_answer(job.id)
         self._render_timeline()
         self._render_evidence()
+
+    def _announce_answer(self, job_id: str) -> None:
+        """Print the conclusion in the chat panel, with the moments it points at."""
+        answer = self._store.answer(job_id)
+        if answer is None:
+            return
+        self._say(answer.text)
+        if not answer.citations:
+            self._say("没有可引用的片段。", style="dim")
+            return
+        moments = "、".join(_span(citation) for citation in answer.citations)
+        self._say(f"证据 {len(answer.citations)} 处：{moments}", style="dim")
 
     def _reload(self) -> None:
         """Render what the store already holds, so a restart does not look like an empty install."""
@@ -333,6 +381,11 @@ class Workbench(App[None]):
         if video is None:
             panel.update("证据：暂无")
             return
+        if self._latest is not None:
+            answer = self._store.answer(self._latest.id)
+            if answer is not None and answer.citations:
+                panel.update(self._citation_text(answer))
+                return
         lines = [f"路径　{video.path}", f"指纹　{video.fingerprint[:16]}…"]
         media = video.media
         if media is None:
@@ -351,6 +404,15 @@ class Workbench(App[None]):
         if self._latest is not None and self._latest.error:
             lines.append(f"错误　{self._latest.error}")
         panel.update("\n".join(lines))
+
+    def _citation_text(self, answer: Answer) -> str:
+        """The moments behind the conclusion on screen, with the words spoken there."""
+        lines = [f"引用 {len(answer.citations)} 处"]
+        for citation in answer.citations[:3]:
+            lines.append(f"{_span(citation)}　{citation.quote[:34]}")
+        if len(answer.citations) > 3:
+            lines.append(f"…另有 {len(answer.citations) - 3} 处")
+        return "\n".join(lines)
 
     def _render_status(self) -> None:
         parts = [f"库 {self._store.path.name}"]
@@ -422,3 +484,10 @@ class Workbench(App[None]):
         self.query_one("#chat", RichLog).write(
             Text(message, style=style or None, overflow="fold")
         )
+
+
+def _span(citation: Citation) -> str:
+    """``mm:ss`` for a single moment, ``mm:ss–mm:ss`` for a stretch."""
+    if citation.end_ms - citation.start_ms <= 1_000:
+        return format_moment(citation.start_ms)
+    return f"{format_moment(citation.start_ms)}–{format_moment(citation.end_ms)}"

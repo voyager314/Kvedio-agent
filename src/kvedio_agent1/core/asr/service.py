@@ -55,6 +55,15 @@ class AsrStage:
         self._chunk_ms = chunk_ms
         self._concurrency = max(1, concurrency)
 
+    def current(self, video: VideoRecord) -> bool:
+        """Whether a finished transcript already exists under the key this stage would use."""
+        transcript = self._store.transcript(video.id)
+        return (
+            transcript is not None
+            and transcript.ready
+            and transcript.cache_key == self._cache_key(video)
+        )
+
     def run(self, video: VideoRecord, report: Report) -> int:
         """Transcribe every unfinished chunk and return the number of segments.
 
@@ -62,7 +71,7 @@ class AsrStage:
         happening, so a resumed run starts where the previous one stopped rather
         than at zero.
         """
-        audio = self._workspace.audio_path(video.id)
+        audio = self._workspace.audio(video.id)
         if not audio.exists():
             raise FileNotFoundError(f"缺少音轨文件：{audio}")
         chunks = plan_chunks(audio, self._chunk_ms)

@@ -5,7 +5,49 @@ import av
 import numpy as np
 import pytest
 
+from kvedio_agent1.core.domain import Citation
+
 RATE = 16_000
+
+
+class StubAnswerer:
+    """Records a fixed conclusion so pipeline tests need no chat endpoint."""
+
+    def __init__(
+        self,
+        store,
+        text: str = "开场白之后进入正题 [00:00]",
+        quote: str = "开场白",
+    ) -> None:
+        self._store = store
+        self._text = text
+        self._quote = quote
+
+    def answer(self, job, report):
+        transcript = self._store.transcript(job.video_id)
+        if transcript is None or not transcript.ready:
+            raise ValueError("没有可用的转录，无法作答")
+        report(0.5, "撰写结论")
+        return self._store.record_answer(
+            job.id,
+            job.video_id,
+            job.question,
+            self._text,
+            "stub",
+            (Citation(start_ms=0, end_ms=600, quote=self._quote),),
+        )
+
+
+@pytest.fixture
+def make_answerer():
+    """The supervisor stand-in class, for tests that own their store."""
+    return StubAnswerer
+
+
+@pytest.fixture
+def answerer(store):
+    """A supervisor stand-in bound to the store under test."""
+    return StubAnswerer(store)
 
 
 @pytest.fixture

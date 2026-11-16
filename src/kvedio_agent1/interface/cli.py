@@ -23,10 +23,11 @@ from ..core.config import (
     load_or_create,
     resolved_api_key,
 )
-from ..core.llm import Transcriber
+from ..core.llm import Chat, Transcriber
 from ..core.media import decoder_version
-from ..core.pipeline import Pipeline
+from ..core.pipeline import Pipeline, Stages
 from ..core.storage import Storage, StorageError
+from ..core.supervisor import Answering
 from ..core.tasks import EventBus
 from ..core.workspace import Workspace
 from .tui import Workbench
@@ -65,17 +66,37 @@ def _workbench() -> int:
         workspace = Workspace(
             loaded.config.runtime.workspace_dir or home_dir() / "workspace"
         )
-        pipeline = Pipeline(
-            store,
-            bus,
-            loaded.config.runtime,
-            workspace,
-            _asr_stage(loaded.config, store, workspace),
+        stages = Stages(
+            runtime=loaded.config.runtime,
+            workspace=workspace,
+            asr=_asr_stage(loaded.config, store, workspace),
+            answering=_answering_stage(loaded.config, store, bus),
         )
-        Workbench(loaded, store, pipeline, bus).run()
+        Workbench(loaded, store, Pipeline(store, bus, stages), bus).run()
     finally:
         store.close()
     return 0
+
+
+def _answering_stage(
+    config: AppConfig, store: Storage, bus: EventBus
+) -> Answering | None:
+    """Build the supervisor from the configured role, or ``None`` when it cannot call out.
+
+    A job then fails at the answer step naming the missing model, which is more
+    honest than returning a transcript that nobody was asked to read.
+    """
+    binding = config.supervisor
+    key = resolved_api_key(binding) if binding is not None else None
+    if binding is None or key is None:
+        return None
+    chat = Chat(
+        url=binding.url,
+        api_key=key,
+        model=binding.model,
+        timeout=config.runtime.request_timeout_seconds,
+    )
+    return Answering(store, bus, chat, binding.model)
 
 
 def _asr_stage(config: AppConfig, store: Storage, workspace: Workspace) -> AsrStage | None:

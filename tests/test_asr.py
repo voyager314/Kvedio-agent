@@ -41,7 +41,9 @@ def prepare(store: Storage, workspace: Workspace, wav: Path):
     video = store.register_video(
         Path("video.mp4"), size_bytes=1, mtime_ns=1, fingerprint="fp-asr"
     )
-    shutil.copy(wav, workspace.audio_path(video.id))
+    target = workspace.audio(video.id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(wav, target)
     return video
 
 
