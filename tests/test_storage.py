@@ -7,6 +7,7 @@ import pytest
 
 from kvedio_agent1.core.domain import (
     Chunk,
+    Citation,
     DependencyMode,
     JobStatus,
     MediaInfo,
@@ -249,3 +250,89 @@ def test_a_transcript_summarises_its_segments(store, tmp_path):
     assert summary.first_ms == 100
     assert summary.last_ms == 2_400
     assert summary.ready is True
+
+
+def test_a_transcript_can_be_read_back_in_timeline_order(store, tmp_path):
+    video = reference(store, tmp_path)
+    transcript = store.open_transcript(video.id, "key", "model", "transcribe")
+    store.save_chunk(
+        transcript.id,
+        video.id,
+        "transcribe",
+        "key",
+        Chunk(index=0, start_ms=0, end_ms=3_000),
+        [
+            Segment(start_ms=1_500, end_ms=2_400, text="第二句"),
+            Segment(start_ms=100, end_ms=900, text="第一句"),
+        ],
+    )
+    store.finish_transcript(transcript.id)
+
+    assert [segment.text for segment in store.transcript_segments(video.id)] == [
+        "第一句",
+        "第二句",
+    ]
+
+
+def test_search_finds_segments_by_keyword_and_escapes_wildcards(store, tmp_path):
+    video = reference(store, tmp_path)
+    transcript = store.open_transcript(video.id, "key", "model", "transcribe")
+    store.save_chunk(
+        transcript.id,
+        video.id,
+        "transcribe",
+        "key",
+        Chunk(index=0, start_ms=0, end_ms=9_000),
+        [
+            Segment(start_ms=0, end_ms=1_000, text="预算还差二十万"),
+            Segment(start_ms=1_000, end_ms=2_000, text="100% 完成"),
+            Segment(start_ms=2_000, end_ms=3_000, text="人力缺口"),
+        ],
+    )
+    store.finish_transcript(transcript.id)
+
+    assert [item.text for item in store.search_segments(video.id, ["预算"], 5)] == [
+        "预算还差二十万"
+    ]
+    assert [item.text for item in store.search_segments(video.id, ["100%"], 5)] == [
+        "100% 完成"
+    ]
+    assert store.search_segments(video.id, ["不存在的词"], 5) == []
+
+
+def test_an_answer_keeps_its_citations(store, tmp_path):
+    video = reference(store, tmp_path)
+    job = store.create_job(video.id, "q", [NewTask(id="answer", agent="supervisor", action="a")])
+
+    stored = store.record_answer(
+        job.id,
+        video.id,
+        "讲了什么",
+        "结论 [00:10]",
+        "chat-model",
+        [
+            Citation(start_ms=10_000, end_ms=11_000, quote="预算不足"),
+            Citation(start_ms=20_000, end_ms=25_000, quote="补两个人"),
+        ],
+    )
+
+    assert stored.text == "结论 [00:10]"
+    assert stored.model == "chat-model"
+    assert [item.quote for item in stored.citations] == ["预算不足", "补两个人"]
+    assert store.answer(job.id).citations[0].start_ms == 10_000
+
+
+def test_recording_a_second_answer_replaces_the_first(store, tmp_path):
+    video = reference(store, tmp_path)
+    job = store.create_job(video.id, "q", [NewTask(id="answer", agent="supervisor", action="a")])
+    store.record_answer(job.id, video.id, "q", "第一版", "m", [Citation(0, 1_000, "一")])
+
+    replaced = store.record_answer(job.id, video.id, "q", "第二版", "m", [])
+
+    assert replaced.text == "第二版"
+    assert replaced.citations == ()
+    assert store.answer(job.id).text == "第二版"
+
+
+def test_an_unknown_job_has_no_answer(store):
+    assert store.answer("job_missing") is None

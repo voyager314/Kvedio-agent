@@ -56,3 +56,14 @@ class Transcript:
     def ready(self) -> bool:
         """Whether every planned chunk is written; a transcript under construction is not cited."""
         return self.completed_at is not None
+
+
+def format_moment(milliseconds: int) -> str:
+    """A position inside a recording as ``mm:ss``.
+
+    Minutes are not wrapped at 60: a two-hour recording reads ``125:03`` rather
+    than pretending to be an hour and five minutes. This is the form the model is
+    told to cite in, so parsing and rendering must agree exactly.
+    """
+    total = max(0, milliseconds) // 1000
+    return f"{total // 60:02d}:{total % 60:02d}"

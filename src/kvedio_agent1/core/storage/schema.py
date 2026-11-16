@@ -12,7 +12,7 @@ import sqlite3
 
 from .errors import StorageError
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _INITIAL = """
 CREATE TABLE video (
@@ -95,7 +95,29 @@ CREATE TABLE checkpoint (
 );
 """
 
-_MIGRATIONS: dict[int, str] = {1: _INITIAL, 2: _TRANSCRIPT}
+_ANSWERS = """
+CREATE TABLE answer (
+    id         INTEGER PRIMARY KEY,
+    job_id     TEXT    NOT NULL UNIQUE REFERENCES job(id),
+    video_id   INTEGER NOT NULL REFERENCES video(id),
+    question   TEXT    NOT NULL,
+    text       TEXT    NOT NULL,
+    model      TEXT    NOT NULL,
+    created_at TEXT    NOT NULL
+);
+
+CREATE TABLE answer_citation (
+    id        INTEGER PRIMARY KEY,
+    answer_id INTEGER NOT NULL REFERENCES answer(id),
+    start_ms  INTEGER NOT NULL,
+    end_ms    INTEGER NOT NULL,
+    quote     TEXT    NOT NULL
+);
+
+CREATE INDEX idx_citation_answer ON answer_citation(answer_id, start_ms);
+"""
+
+_MIGRATIONS: dict[int, str] = {1: _INITIAL, 2: _TRANSCRIPT, 3: _ANSWERS}
 
 
 def migrate(connection: sqlite3.Connection) -> None:

@@ -18,7 +18,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from ..domain import (
+    Answer,
     Chunk,
+    Citation,
     DependencyMode,
     JobRecord,
     JobStatus,
@@ -354,6 +356,98 @@ class Storage:
                 (_instant(_now()), transcript_id),
             )
 
+    def transcript_segments(self, video_id: int) -> list[Segment]:
+        """Every segment of the finished transcript, in timeline order."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT s.start_ms, s.end_ms, s.text FROM transcript_segment s"
+                " JOIN transcript t ON t.id = s.transcript_id"
+                " WHERE t.video_id = ? AND t.completed_at IS NOT NULL"
+                " ORDER BY s.start_ms",
+                (video_id,),
+            ).fetchall()
+        return [_segment(row) for row in rows]
+
+    def search_segments(self, video_id: int, terms: Sequence[str], limit: int) -> list[Segment]:
+        """Segments whose text contains any of the terms, in timeline order.
+
+        Substring matching rather than a tokenizer: a Chinese phrase needs no
+        word boundaries, and a plan usually searches for one. ``%`` and ``_`` in a
+        term are escaped so they stay literal.
+        """
+        cleaned = [term.strip() for term in terms if term.strip()]
+        if not cleaned or limit <= 0:
+            return []
+        clause = " OR ".join("s.text LIKE ? ESCAPE '\\'" for _ in cleaned)
+        parameters = [f"%{_escape_like(term)}%" for term in cleaned]
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT s.start_ms, s.end_ms, s.text FROM transcript_segment s"
+                " JOIN transcript t ON t.id = s.transcript_id"
+                f" WHERE t.video_id = ? AND t.completed_at IS NOT NULL AND ({clause})"
+                " ORDER BY s.start_ms LIMIT ?",
+                (video_id, *parameters, limit),
+            ).fetchall()
+        return [_segment(row) for row in rows]
+
+    def record_answer(
+        self,
+        job_id: str,
+        video_id: int,
+        question: str,
+        text: str,
+        model: str,
+        citations: Sequence[Citation],
+    ) -> Answer:
+        """Store one conclusion and the moments it cites, as one transaction.
+
+        A job answers once: recording a second answer replaces the first, so a
+        retried job cannot leave two conclusions for the same question.
+        """
+        moment = _instant(_now())
+        with self._lock, self._connection:
+            existing = self._connection.execute(
+                "SELECT id FROM answer WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if existing is not None:
+                self._connection.execute(
+                    "DELETE FROM answer_citation WHERE answer_id = ?", (existing["id"],)
+                )
+                self._connection.execute("DELETE FROM answer WHERE id = ?", (existing["id"],))
+            cursor = self._connection.execute(
+                "INSERT INTO answer (job_id, video_id, question, text, model, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (job_id, video_id, question, text, model, moment),
+            )
+            answer_id = int(cursor.lastrowid or 0)
+            self._connection.executemany(
+                "INSERT INTO answer_citation (answer_id, start_ms, end_ms, quote)"
+                " VALUES (?, ?, ?, ?)",
+                [
+                    (answer_id, citation.start_ms, citation.end_ms, citation.quote)
+                    for citation in citations
+                ],
+            )
+        stored = self.answer(job_id)
+        if stored is None:
+            raise StorageError(f"结论无法读取：{job_id}")
+        return stored
+
+    def answer(self, job_id: str) -> Answer | None:
+        """The conclusion recorded for one job, with its citations, or ``None``."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM answer WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            citations = self._connection.execute(
+                "SELECT start_ms, end_ms, quote FROM answer_citation"
+                " WHERE answer_id = ? ORDER BY start_ms",
+                (row["id"],),
+            ).fetchall()
+        return _answer(row, citations)
+
     def abandon_interrupted(self) -> list[str]:
         """Fail every job an earlier process left running, together with its unfinished nodes.
 
@@ -455,6 +549,31 @@ def _job(row: sqlite3.Row) -> JobRecord:
         finished_at=_moment(row["finished_at"]) if row["finished_at"] else None,
         error=row["error"],
     )
+
+
+def _segment(row: sqlite3.Row) -> Segment:
+    return Segment(start_ms=row["start_ms"], end_ms=row["end_ms"], text=row["text"])
+
+
+def _answer(row: sqlite3.Row, citations: Sequence[sqlite3.Row]) -> Answer:
+    return Answer(
+        id=row["id"],
+        job_id=row["job_id"],
+        video_id=row["video_id"],
+        question=row["question"],
+        text=row["text"],
+        model=row["model"],
+        citations=tuple(
+            Citation(start_ms=item["start_ms"], end_ms=item["end_ms"], quote=item["quote"])
+            for item in citations
+        ),
+        created_at=_moment(row["created_at"]),
+    )
+
+
+def _escape_like(term: str) -> str:
+    """Make a term literal inside a LIKE pattern; the caller supplies the wildcards."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _transcript(row: sqlite3.Row) -> Transcript:
