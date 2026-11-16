@@ -21,6 +21,7 @@ from ..domain import (
     Answer,
     Chunk,
     Citation,
+    Coverage,
     DependencyMode,
     JobRecord,
     JobStatus,
@@ -447,6 +448,143 @@ class Storage:
                 (row["id"],),
             ).fetchall()
         return _answer(row, citations)
+
+    def coverage(self, video_id: int) -> list[Coverage]:
+        """The map of one video, in recording order; empty when none was built."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT start_ms, end_ms, gist FROM coverage_block"
+                " WHERE video_id = ? ORDER BY position",
+                (video_id,),
+            ).fetchall()
+        return [
+            Coverage(start_ms=row["start_ms"], end_ms=row["end_ms"], gist=row["gist"])
+            for row in rows
+        ]
+
+    def save_coverage(
+        self, video_id: int, cache_key: str, position: int, block: Coverage
+    ) -> None:
+        """Write one map entry; the same position under the same key replaces the old line."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO coverage_block"
+                " (video_id, cache_key, position, start_ms, end_ms, gist, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    video_id,
+                    cache_key,
+                    position,
+                    block.start_ms,
+                    block.end_ms,
+                    block.gist,
+                    _instant(_now()),
+                ),
+            )
+
+    def coverage_positions(self, video_id: int, cache_key: str) -> set[int]:
+        """Positions already written under this key, so a rebuild resumes instead of repeating."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT position FROM coverage_block WHERE video_id = ? AND cache_key = ?",
+                (video_id, cache_key),
+            ).fetchall()
+        return {row["position"] for row in rows}
+
+    def coverage_count(self, video_id: int, cache_key: str) -> int:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT COUNT(*) AS total FROM coverage_block"
+                " WHERE video_id = ? AND cache_key = ?",
+                (video_id, cache_key),
+            ).fetchone()
+        return int(row["total"])
+
+    def prune_coverage(self, video_id: int, keep_key: str) -> None:
+        """Drop map entries produced under a key that no longer applies."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM coverage_block WHERE video_id = ? AND cache_key != ?",
+                (video_id, keep_key),
+            )
+
+    def indexed_segments(self, video_id: int) -> list[tuple[int, Segment]]:
+        """Every segment of the finished transcript with its stored id, in timeline order."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT s.id, s.start_ms, s.end_ms, s.text FROM transcript_segment s"
+                " JOIN transcript t ON t.id = s.transcript_id"
+                " WHERE t.video_id = ? AND t.completed_at IS NOT NULL"
+                " ORDER BY s.start_ms, s.id",
+                (video_id,),
+            ).fetchall()
+        return [(row["id"], _segment(row)) for row in rows]
+
+    def save_vectors(
+        self, video_id: int, cache_key: str, rows: Sequence[tuple[int, int, bytes]]
+    ) -> None:
+        """Store one batch of vectors as ``(segment_id, start_ms, float32 bytes)``.
+
+        A batch is written in one transaction, so an interrupted build keeps every
+        batch that finished and resumes at the first segment without a vector.
+        """
+        with self._lock, self._connection:
+            self._connection.executemany(
+                "INSERT OR REPLACE INTO segment_vector"
+                " (video_id, cache_key, segment_id, start_ms, dims, vector)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (video_id, cache_key, segment_id, start_ms, len(blob) // 4, blob)
+                    for segment_id, start_ms, blob in rows
+                ],
+            )
+
+    def vectorised_ids(self, video_id: int, cache_key: str) -> set[int]:
+        """Segment ids that already have a vector under this key."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT segment_id FROM segment_vector WHERE video_id = ? AND cache_key = ?",
+                (video_id, cache_key),
+            ).fetchall()
+        return {row["segment_id"] for row in rows}
+
+    def vector_count(self, video_id: int, cache_key: str) -> int:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT COUNT(*) AS total FROM segment_vector"
+                " WHERE video_id = ? AND cache_key = ?",
+                (video_id, cache_key),
+            ).fetchone()
+        return int(row["total"])
+
+    def prune_vectors(self, video_id: int, keep_key: str) -> None:
+        """Drop vectors produced by an embedding model that no longer applies."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM segment_vector WHERE video_id = ? AND cache_key != ?",
+                (video_id, keep_key),
+            )
+
+    def vectorised(self, video_id: int) -> list[tuple[Segment, bytes]]:
+        """Every segment with a vector, in timeline order, ready for a similarity scan."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT s.start_ms, s.end_ms, s.text, v.vector FROM segment_vector v"
+                " JOIN transcript_segment s ON s.id = v.segment_id"
+                " WHERE v.video_id = ? ORDER BY s.start_ms, s.id",
+                (video_id,),
+            ).fetchall()
+        return [(_segment(row), bytes(row["vector"])) for row in rows]
+
+    def memory_summary(self, video_id: int) -> tuple[int, int]:
+        """How many map entries and vectors exist for this video, for the interface."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT (SELECT COUNT(*) FROM coverage_block WHERE video_id = ?) AS blocks,"
+                " (SELECT COUNT(*) FROM segment_vector WHERE video_id = ?) AS vectors",
+                (video_id, video_id),
+            ).fetchone()
+        return int(row["blocks"]), int(row["vectors"])
 
     def abandon_interrupted(self) -> list[str]:
         """Fail every job an earlier process left running, together with its unfinished nodes.

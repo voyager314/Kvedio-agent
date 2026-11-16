@@ -12,7 +12,7 @@ import sqlite3
 
 from .errors import StorageError
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _INITIAL = """
 CREATE TABLE video (
@@ -117,7 +117,33 @@ CREATE TABLE answer_citation (
 CREATE INDEX idx_citation_answer ON answer_citation(answer_id, start_ms);
 """
 
-_MIGRATIONS: dict[int, str] = {1: _INITIAL, 2: _TRANSCRIPT, 3: _ANSWERS}
+_MEMORY = """
+CREATE TABLE coverage_block (
+    id         INTEGER PRIMARY KEY,
+    video_id   INTEGER NOT NULL REFERENCES video(id),
+    cache_key  TEXT    NOT NULL,
+    position   INTEGER NOT NULL,          -- 该块在录像中的次序
+    start_ms   INTEGER NOT NULL,
+    end_ms     INTEGER NOT NULL,
+    gist       TEXT    NOT NULL,
+    created_at TEXT    NOT NULL,
+    UNIQUE (video_id, cache_key, position)
+);
+
+CREATE TABLE segment_vector (
+    video_id   INTEGER NOT NULL REFERENCES video(id),
+    cache_key  TEXT    NOT NULL,
+    segment_id INTEGER NOT NULL REFERENCES transcript_segment(id),
+    start_ms   INTEGER NOT NULL,          -- 冗余一份，检索时不必回头 join 排序
+    dims       INTEGER NOT NULL,
+    vector     BLOB    NOT NULL,          -- float32 小端，紧密排列
+    PRIMARY KEY (video_id, cache_key, segment_id)
+);
+
+CREATE INDEX idx_vector_key ON segment_vector(video_id, cache_key, start_ms);
+"""
+
+_MIGRATIONS: dict[int, str] = {1: _INITIAL, 2: _TRANSCRIPT, 3: _ANSWERS, 4: _MEMORY}
 
 
 def migrate(connection: sqlite3.Connection) -> None:

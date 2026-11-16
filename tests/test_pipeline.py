@@ -6,6 +6,8 @@ import pytest
 from kvedio_agent1.core.asr import AsrStage
 from kvedio_agent1.core.config.schema import RuntimeLimits
 from kvedio_agent1.core.domain import Event, EventKind, JobStatus, Segment, TaskStatus
+from kvedio_agent1.core.llm import Reply
+from kvedio_agent1.core.memory import MemoryBuilder
 from kvedio_agent1.core.pipeline import Pipeline, Stages
 from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.core.tasks import EventBus
@@ -28,7 +30,7 @@ def spoken(audio: Path) -> list[Segment]:
     return [Segment(start_ms=0, end_ms=500, text="开场")]
 
 
-def build(store, workspace, answering, transcribe=spoken, **runtime):
+def build(store, workspace, answering, transcribe=spoken, memory=None, **runtime):
     bus = EventBus()
     asr = None
     if transcribe is not None:
@@ -45,6 +47,7 @@ def build(store, workspace, answering, transcribe=spoken, **runtime):
         runtime=RuntimeLimits(**runtime),
         workspace=workspace,
         asr=asr,
+        memory=memory,
         answering=answering,
     )
     return Pipeline(store, bus, stages), bus
@@ -91,6 +94,37 @@ def test_a_reference_is_probed_transcribed_answered(store, workspace, answerer, 
     assert kinds[0] is EventKind.JOB_QUEUED
     assert EventKind.VIDEO_REGISTERED in kinds
     assert kinds[-1] is EventKind.JOB_SUCCEEDED
+
+
+class _Chat:
+    def complete(self, messages, *, json_mode: bool = False) -> Reply:
+        return Reply(text="一块", model="stub", prompt_tokens=0, completion_tokens=0)
+
+
+class _Embedder:
+    model = "stub-embed"
+
+    def embed(self, texts):
+        return [[1.0] for _ in texts]
+
+
+def test_memory_is_built_between_transcript_and_answer(
+    store, workspace, answerer, sample_video
+):
+    builder = MemoryBuilder(store, _Chat(), _Embedder(), model="stub")
+    pipeline, _ = build(store, workspace, answerer, memory=builder)
+
+    finished = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
+
+    assert finished.status is JobStatus.SUCCEEDED, finished.error
+    assert [task.id for task in store.tasks_for_job(finished.id)] == [
+        "probe",
+        "audio",
+        "transcribe",
+        "memory",
+        "answer",
+    ]
+    assert store.memory_summary(finished.video_id)[1] == 1
 
 
 def test_a_second_question_reuses_every_finished_stage(store, workspace, answerer, sample_video):

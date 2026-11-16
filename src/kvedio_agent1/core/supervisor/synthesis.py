@@ -6,9 +6,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ...tools import Evidence
+from .. import prompts
 from ..domain import Citation
 from ..llm import Chat, Message
-from . import citations, prompts
+from . import citations
 
 REPAIR_SAMPLES = 4  # how many allowed moments the correction shows as examples
 
@@ -54,12 +55,9 @@ def write(
     if verdict.ok:
         return Conclusion(text=reply.text.strip(), citations=verdict.citations)
 
+    examples = [item for item in evidence if item.verbatim][:REPAIR_SAMPLES]
     repair = prompts.render(
-        "repair",
-        missing=verdict.missing,
-        cited=verdict.cited,
-        evidence=evidence,
-        limit=REPAIR_SAMPLES,
+        "repair", missing=verdict.missing, cited=verdict.cited, examples=examples
     )
     second = chat.complete(
         [*base, Message(role="assistant", content=reply.text), Message(role="user", content=repair)]

@@ -11,6 +11,7 @@ from .job import (
     TaskRecord,
     TaskStatus,
 )
+from .memory import Coverage
 from .transcript import Chunk, Segment, Transcript, format_moment
 from .video import FileIdentity, MediaInfo, VideoRecord
 
@@ -18,6 +19,7 @@ __all__ = [
     "TERMINAL",
     "Answer",
     "Chunk",
+    "Coverage",
     "Citation",
     "DependencyMode",
     "Event",

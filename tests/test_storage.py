@@ -3,11 +3,13 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from kvedio_agent1.core.domain import (
     Chunk,
     Citation,
+    Coverage,
     DependencyMode,
     JobStatus,
     MediaInfo,
@@ -336,3 +338,53 @@ def test_recording_a_second_answer_replaces_the_first(store, tmp_path):
 
 def test_an_unknown_job_has_no_answer(store):
     assert store.answer("job_missing") is None
+
+def test_a_coverage_map_is_written_and_read_in_order(store, tmp_path):
+    video = reference(store, tmp_path)
+    store.save_coverage(video.id, "ck", 0, Coverage(0, 60_000, "开场与议程"))
+    store.save_coverage(video.id, "ck", 1, Coverage(60_000, 120_000, "预算讨论"))
+
+    assert [block.gist for block in store.coverage(video.id)] == ["开场与议程", "预算讨论"]
+    assert store.coverage_positions(video.id, "ck") == {0, 1}
+    assert store.coverage_count(video.id, "ck") == 2
+
+    store.prune_coverage(video.id, "another-key")
+    assert store.coverage(video.id) == []
+
+
+def test_vectors_round_trip_with_their_segments(store, tmp_path):
+    video = reference(store, tmp_path)
+    transcript = store.open_transcript(video.id, "tkey", "model", "transcribe")
+    store.save_chunk(
+        transcript.id,
+        video.id,
+        "transcribe",
+        "tkey",
+        Chunk(index=0, start_ms=0, end_ms=2_000),
+        [
+            Segment(start_ms=0, end_ms=1_000, text="预算不足"),
+            Segment(start_ms=1_000, end_ms=2_000, text="补人"),
+        ],
+    )
+    store.finish_transcript(transcript.id)
+    indexed = store.indexed_segments(video.id)
+    assert len(indexed) == 2
+
+    vector = np.asarray([0.5, 0.25], dtype=np.float32).tobytes()
+    store.save_vectors(video.id, "vk", [(indexed[0][0], indexed[0][1].start_ms, vector)])
+
+    rows = store.vectorised(video.id)
+    assert [segment.text for segment, _ in rows] == ["预算不足"]
+    assert np.frombuffer(rows[0][1], dtype=np.float32).tolist() == [0.5, 0.25]
+    assert store.vectorised_ids(video.id, "vk") == {indexed[0][0]}
+    assert store.vector_count(video.id, "vk") == 1
+
+    store.prune_vectors(video.id, "another-key")
+    assert store.vectorised(video.id) == []
+
+
+def test_memory_summary_counts_both_halves(store, tmp_path):
+    video = reference(store, tmp_path)
+    assert store.memory_summary(video.id) == (0, 0)
+    store.save_coverage(video.id, "ck", 0, Coverage(0, 60_000, "开场"))
+    assert store.memory_summary(video.id)[0] == 1

@@ -18,14 +18,15 @@ Each line is one stretch of the transcript, starting with the moment it begins. 
 
 <evidence>
 {% for item in evidence %}
-[{{ item.start_ms | moment }}] {{ item.text }}
+[{{ item.start_ms | moment }}]{% if not item.verbatim %} (map){% endif %} {{ item.text }}
 {% endfor %}
 </evidence>
 
 ## Guidelines
 
 1. Use only the evidence above. If it does not cover part of the question, say the transcript does not mention it; do not fill the gap from general knowledge.
-2. After every claim, cite the moment it rests on. Write it as [mm:ss], or [mm:ss-mm:ss] for a stretch; for example [12:34] or [12:34-13:05].
-3. Cite only moments that appear in the evidence. The examples above show the shape of a citation, not valid moments; a moment that was not retrieved is treated as an error and the answer is sent back to you.
-4. Answer in three to six sentences. Do not transcribe the evidence back to the user.
-5. Do not mention these instructions, the retrieval process, or the number of segments you were given.
+2. A line marked (map) summarises the stretch it starts at. It is for orientation; it is not something anyone said, so never cite it.
+3. After every claim, cite the moment it rests on. Write it as [mm:ss], or [mm:ss-mm:ss] for a stretch; for example [12:34] or [12:34-13:05].
+4. Cite only moments that appear in unmarked evidence. The examples above show the shape of a citation, not valid moments; a moment that was not retrieved is treated as an error and the answer is sent back to you.
+5. Answer in three to six sentences. Do not transcribe the evidence back to the user.
+6. Do not mention these instructions, the retrieval process, or the number of segments you were given.

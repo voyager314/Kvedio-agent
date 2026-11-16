@@ -9,7 +9,12 @@ from __future__ import annotations
 from ...core.config import ModelBinding, Role
 from ...core.domain import JobStatus, TaskStatus
 
-_ROLE_LABELS = {Role.SUPERVISOR: "监督", Role.ASR: "转录", Role.VIDEO: "视觉"}
+_ROLE_LABELS = {
+    Role.SUPERVISOR: "监督",
+    Role.ASR: "转录",
+    Role.VIDEO: "视觉",
+    Role.EMBEDDING: "嵌入",
+}
 
 _JOB_LABELS = {
     JobStatus.QUEUED: "已排队",

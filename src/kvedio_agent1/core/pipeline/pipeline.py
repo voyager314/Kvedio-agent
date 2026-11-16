@@ -25,6 +25,7 @@ from ..asr import AsrStage
 from ..config.schema import RuntimeLimits
 from ..domain import Answer, Event, EventKind, JobRecord, NewTask, VideoRecord
 from ..media import extract_audio, identify, probe
+from ..memory import MemoryBuilder
 from ..storage import Storage, StorageError
 from ..supervisor import Answering
 from ..tasks import EventBus, Scheduler, TaskContext
@@ -50,6 +51,7 @@ class Stages:
     runtime: RuntimeLimits
     workspace: Workspace
     asr: AsrStage | None = None
+    memory: MemoryBuilder | None = None
     answering: Answering | Answerer | None = None
 
 
@@ -100,6 +102,7 @@ class Pipeline:
             "probe": self._probe,
             "audio": self._audio,
             "transcribe": self._transcribe,
+            "memory": self._memory,
             "answer": self._answer,
         }
         return self._scheduler.run(job, handlers)
@@ -113,9 +116,14 @@ class Pipeline:
             tasks.append(
                 NewTask(id="audio", agent="media", action="extract_audio", depends_on=_tail(tasks))
             )
-        if self._needs_transcript(video):
+        transcript_needed = self._needs_transcript(video)
+        if transcript_needed:
             tasks.append(
                 NewTask(id="transcribe", agent="asr", action="transcribe", depends_on=_tail(tasks))
+            )
+        if self._needs_memory(video, after_transcript=transcript_needed):
+            tasks.append(
+                NewTask(id="memory", agent="memory", action="build", depends_on=_tail(tasks))
             )
         tasks.append(
             NewTask(id="answer", agent="supervisor", action="answer", depends_on=_tail(tasks))
@@ -126,6 +134,16 @@ class Pipeline:
         if video.media is not None and video.media.audio_codec is None:
             return False
         return not self._stages.workspace.audio(video.id).exists()
+
+    def _needs_memory(self, video: VideoRecord, *, after_transcript: bool) -> bool:
+        builder = self._stages.memory
+        if builder is None:
+            return False
+        if video.media is not None and video.media.audio_codec is None:
+            return False
+        if after_transcript:
+            return True  # the transcript is about to change, so the memory must follow it
+        return not builder.current(video)
 
     def _needs_transcript(self, video: VideoRecord) -> bool:
         if video.media is not None and video.media.audio_codec is None:
@@ -192,6 +210,23 @@ class Pipeline:
         context.report(0.0, "开始转录")
         count = asr.run(video, context.report)
         self._log(context, f"转录完成：{count} 段")
+        context.report(1.0)
+
+    def _memory(self, context: TaskContext) -> None:
+        """Build the coverage map and the vector index, skipping what is already there."""
+        builder = self._stages.memory
+        if builder is None:
+            context.report(1.0)
+            return
+        video = self._video(context)
+        transcript = self._store.transcript(video.id)
+        if transcript is None or not transcript.ready:
+            self._log(context, "没有转录，跳过记忆")
+            context.report(1.0)
+            return
+        context.report(0.0, "建立记忆")
+        stats = builder.build(video, context.report)
+        self._log(context, f"记忆完成：覆盖图 {stats.blocks} 块 · 向量 {stats.vectors} 条")
         context.report(1.0)
 
     def _answer(self, context: TaskContext) -> None:

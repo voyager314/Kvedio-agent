@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...tools import Tool
+from .. import prompts
 from ..llm import Chat, Message
-from . import prompts
 
 MAX_STEPS = 4
 

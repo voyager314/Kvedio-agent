@@ -12,7 +12,7 @@ from importlib import resources
 
 from jinja2 import Environment, FunctionLoader, StrictUndefined
 
-from ..domain import format_moment
+from .domain import format_moment
 
 
 def _moment(value: object) -> str:

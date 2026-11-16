@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from kvedio_agent1.core.domain import Chunk, MediaInfo, Segment
+from kvedio_agent1.core.memory import VideoMemory
 from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.tools import ToolBox
 
@@ -45,6 +46,11 @@ def prepare(store: Storage, segments: list[Segment]):
     return video
 
 
+def box(store, video, **options):
+    """A toolbox over one video, with the memory reader it needs."""
+    return ToolBox(store, video, VideoMemory(store, video), **options)
+
+
 SEGMENTS = [
     Segment(start_ms=0, end_ms=5_000, text="今天我们先过一遍项目进度"),
     Segment(start_ms=5_000, end_ms=12_000, text="预算方面还有二十万的缺口"),
@@ -54,7 +60,7 @@ SEGMENTS = [
 
 def test_overview_samples_the_transcript(store):
     video = prepare(store, SEGMENTS)
-    result = ToolBox(store, video).call("overview", {})
+    result = box(store, video).call("overview", {})
     assert len(result.evidence) == 3
     assert result.note.startswith("overview")
     assert result.evidence[0].start_ms == 0
@@ -62,28 +68,28 @@ def test_overview_samples_the_transcript(store):
 
 def test_search_returns_the_matching_segments(store):
     video = prepare(store, SEGMENTS)
-    result = ToolBox(store, video).call("search", {"query": "预算"})
+    result = box(store, video).call("search", {"query": "预算"})
     assert [item.text for item in result.evidence] == ["预算方面还有二十万的缺口"]
-    assert result.note == "search(预算)：1 段"
+    assert result.note == "search(预算)：1 段 · 关键词检索"
 
 
 def test_search_falls_back_to_character_windows_for_a_long_phrase(store):
     video = prepare(store, SEGMENTS)
-    result = ToolBox(store, video).call("search", {"query": "这次会议的预算怎么安排"})
+    result = box(store, video).call("search", {"query": "这次会议的预算怎么安排"})
     assert "预算" in result.note
     assert result.evidence
 
 
 def test_search_without_a_query_returns_a_note(store):
     video = prepare(store, SEGMENTS)
-    result = ToolBox(store, video).call("search", {"query": "  "})
+    result = box(store, video).call("search", {"query": "  "})
     assert result.evidence == ()
     assert "缺少关键词" in result.note
 
 
 def test_read_range_keeps_segments_that_straddle_the_boundary(store):
     video = prepare(store, SEGMENTS)
-    result = ToolBox(store, video).call("read_range", {"start": 4, "end": 13})
+    result = box(store, video).call("read_range", {"start": 4, "end": 13})
     assert [item.text for item in result.evidence] == [
         "今天我们先过一遍项目进度",
         "预算方面还有二十万的缺口",
@@ -93,26 +99,26 @@ def test_read_range_keeps_segments_that_straddle_the_boundary(store):
 
 def test_read_range_rejects_a_backwards_span(store):
     video = prepare(store, SEGMENTS)
-    result = ToolBox(store, video).call("read_range", {"start": 9, "end": 3})
+    result = box(store, video).call("read_range", {"start": 9, "end": 3})
     assert result.evidence == ()
     assert "start < end" in result.note
 
 
 def test_an_unknown_tool_answers_instead_of_raising(store):
     video = prepare(store, SEGMENTS)
-    result = ToolBox(store, video).call("download", {})
+    result = box(store, video).call("download", {})
     assert result.evidence == ()
     assert "没有这个工具" in result.note
 
 
 def test_the_budget_stops_a_call_and_says_so(store):
     video = prepare(store, SEGMENTS)
-    box = ToolBox(store, video, budget=12)
-    result = box.call("overview", {})
+    limited = box(store, video, budget=12)
+    result = limited.call("overview", {})
     assert len(result.evidence) < len(SEGMENTS)
     assert "预算" in result.note
 
-    spent = box.call("search", {"query": "预算"})
+    spent = limited.call("search", {"query": "预算"})
     assert spent.evidence == ()
     assert "预算已用尽" in spent.note
 
@@ -121,6 +127,6 @@ def test_long_segments_are_clipped_for_the_model(store):
     video = prepare(
         store, [Segment(start_ms=0, end_ms=10_000, text="很长的句子" * 100)]
     )
-    result = ToolBox(store, video).call("overview", {})
+    result = box(store, video).call("overview", {})
     assert result.evidence[0].text.endswith("…")
     assert len(result.evidence[0].text) <= 160

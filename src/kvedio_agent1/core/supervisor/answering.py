@@ -6,7 +6,8 @@ from collections.abc import Callable
 
 from ...tools import Evidence, ToolBox
 from ..domain import Answer, Event, EventKind, JobRecord
-from ..llm import Chat
+from ..llm import Chat, Embedder
+from ..memory import VideoMemory
 from ..storage import Storage, StorageError
 from ..tasks import EventBus
 from .planner import Plan, make_plan
@@ -24,11 +25,19 @@ class Answering:
     behind it are visible.
     """
 
-    def __init__(self, store: Storage, bus: EventBus, chat: Chat, model: str) -> None:
+    def __init__(
+        self,
+        store: Storage,
+        bus: EventBus,
+        chat: Chat,
+        model: str,
+        embedder: Embedder | None = None,
+    ) -> None:
         self._store = store
         self._bus = bus
         self._chat = chat
         self._model = model
+        self._embedder = embedder
 
     def answer(self, job: JobRecord, report: Report) -> Answer:
         """Plan, retrieve, write, check, store — or raise, leaving no answer behind."""
@@ -39,7 +48,7 @@ class Answering:
         if transcript is None or not transcript.ready:
             raise ValueError("没有可用的转录，无法作答")
 
-        toolbox = ToolBox(self._store, video)
+        toolbox = ToolBox(self._store, video, VideoMemory(self._store, video, self._embedder))
         report(0.05, "生成计划")
         plan = make_plan(self._chat, job.question, toolbox.tools)
         self._log(job, plan.note)

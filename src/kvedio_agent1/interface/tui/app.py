@@ -357,6 +357,7 @@ class Workbench(App[None]):
             f"时间轴：00:00:00 ────────────── {format_duration(video.media.duration_ms)}",
             f"{format_size(video.size_bytes)}　·　{format_container(video.media.container)}",
             self._transcript_line(video),
+            self._memory_line(video),
         ]
         panel.update("\n".join(lines))
 
@@ -374,6 +375,17 @@ class Workbench(App[None]):
         first = format_duration(transcript.first_ms or 0)
         last = format_duration(transcript.last_ms or 0)
         return f"转录：{transcript.segment_count} 段 · {first}–{last} · {transcript.model}"
+
+    def _memory_line(self, video: VideoRecord) -> str:
+        """Whether the map and the vector index exist, and how large they are."""
+        blocks, vectors = self._store.memory_summary(video.id)
+        if blocks and vectors:
+            return f"记忆：覆盖图 {blocks} 块 · 向量 {vectors} 条"
+        if vectors:
+            return f"记忆：向量 {vectors} 条"
+        if blocks:
+            return f"记忆：覆盖图 {blocks} 块"
+        return "记忆：未建立"
 
     def _render_evidence(self) -> None:
         panel = self.query_one("#evidence", Static)

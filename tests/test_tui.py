@@ -6,6 +6,8 @@ from textual.widgets import DataTable, Input, Static
 from kvedio_agent1.core.asr import AsrStage
 from kvedio_agent1.core.config import load_or_create
 from kvedio_agent1.core.domain import JobStatus, Segment
+from kvedio_agent1.core.llm import Reply
+from kvedio_agent1.core.memory import MemoryBuilder
 from kvedio_agent1.core.pipeline import Pipeline, Stages
 from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.core.tasks import EventBus
@@ -15,6 +17,18 @@ from kvedio_agent1.interface.tui import Workbench
 
 def spoken(audio: Path) -> list[Segment]:
     return [Segment(start_ms=0, end_ms=600, text="开场白")]
+
+
+class _Chat:
+    def complete(self, messages, *, json_mode: bool = False) -> Reply:
+        return Reply(text="一块", model="stub", prompt_tokens=0, completion_tokens=0)
+
+
+class _Embedder:
+    model = "stub-embed"
+
+    def embed(self, texts):
+        return [[1.0] for _ in texts]
 
 
 def build(store, workspace, bus, loaded, answerer) -> Pipeline:
@@ -31,6 +45,7 @@ def build(store, workspace, bus, loaded, answerer) -> Pipeline:
         runtime=loaded.config.runtime,
         workspace=workspace,
         asr=asr,
+        memory=MemoryBuilder(store, _Chat(), _Embedder(), model="stub"),
         answering=answerer,
     )
     return Pipeline(store, bus, stages)
@@ -65,12 +80,13 @@ def test_a_reference_travels_from_the_input_line_to_the_evidence_panel(
                 if "引用 1 处" in evidence:
                     break
                 await pilot.pause(0.05)
-            assert app.query_one("#tasks", DataTable).row_count == 4
+            assert app.query_one("#tasks", DataTable).row_count == 5
             assert "转录" in str(app.query_one("#status", Static).render())
             assert "引用 1 处" in str(app.query_one("#evidence", Static).render())
             assert "开场白" in str(app.query_one("#evidence", Static).render())
             timeline = str(app.query_one("#timeline", Static).render())
             assert "转录：1 段" in timeline
+            assert "记忆：向量 1 条" in timeline
             assert store.answer(jobs[0].id) is not None
 
     asyncio.run(scenario())

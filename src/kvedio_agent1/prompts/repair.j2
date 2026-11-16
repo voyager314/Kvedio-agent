@@ -1,6 +1,6 @@
 {% if missing %}Your previous answer cited moments that were not in the evidence: {{ missing | join(", ") }}.{% else %}Your previous answer cited no moment at all.{% endif +%}
 
 Rewrite it under the same rules, in the same language as the question. You may cite only moments that appear in the evidence, for example:
-{% for item in evidence[:limit] %}
+{% for item in examples %}
 - [{{ item.start_ms | moment }}] {{ item.text[:80] }}
 {% endfor %}

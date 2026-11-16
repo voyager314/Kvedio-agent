@@ -21,6 +21,7 @@ class Role(StrEnum):
     SUPERVISOR = "supervisor"
     ASR = "asr"
     VIDEO = "video"
+    EMBEDDING = "embedding"
 
 
 class ModelBinding(BaseModel):
@@ -77,6 +78,7 @@ class RuntimeLimits(BaseModel):
     request_timeout_seconds: int = Field(default=120, gt=0)
     asr_chunk_seconds: int = Field(default=300, ge=10, le=1800)
     asr_concurrency: int = Field(default=2, ge=1, le=16)
+    coverage_block_seconds: int = Field(default=180, ge=30, le=900)
     workspace_dir: Path | None = None
 
 
@@ -92,6 +94,7 @@ class AppConfig(BaseModel):
     supervisor: ModelBinding | None = None
     asr: ModelBinding | None = None
     video: ModelBinding | None = None
+    embedding: ModelBinding | None = None
     runtime: RuntimeLimits = RuntimeLimits()
 
     def for_role(self, role: Role) -> ModelBinding | None:

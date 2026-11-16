@@ -23,8 +23,9 @@ from ..core.config import (
     load_or_create,
     resolved_api_key,
 )
-from ..core.llm import Chat, Transcriber
+from ..core.llm import Chat, Embedder, Transcriber
 from ..core.media import decoder_version
+from ..core.memory import MemoryBuilder
 from ..core.pipeline import Pipeline, Stages
 from ..core.storage import Storage, StorageError
 from ..core.supervisor import Answering
@@ -66,11 +67,14 @@ def _workbench() -> int:
         workspace = Workspace(
             loaded.config.runtime.workspace_dir or home_dir() / "workspace"
         )
+        chat = _chat(loaded.config)
+        embedder = _embedder(loaded.config)
         stages = Stages(
             runtime=loaded.config.runtime,
             workspace=workspace,
             asr=_asr_stage(loaded.config, store, workspace),
-            answering=_answering_stage(loaded.config, store, bus),
+            memory=_memory_stage(loaded.config, store, chat, embedder),
+            answering=_answering_stage(loaded.config, store, bus, chat, embedder),
         )
         Workbench(loaded, store, Pipeline(store, bus, stages), bus).run()
     finally:
@@ -78,25 +82,65 @@ def _workbench() -> int:
     return 0
 
 
-def _answering_stage(
-    config: AppConfig, store: Storage, bus: EventBus
-) -> Answering | None:
-    """Build the supervisor from the configured role, or ``None`` when it cannot call out.
-
-    A job then fails at the answer step naming the missing model, which is more
-    honest than returning a transcript that nobody was asked to read.
-    """
+def _chat(config: AppConfig) -> Chat | None:
+    """The conversation client, or ``None`` when the role has no model or no usable key."""
     binding = config.supervisor
     key = resolved_api_key(binding) if binding is not None else None
     if binding is None or key is None:
         return None
-    chat = Chat(
+    return Chat(
         url=binding.url,
         api_key=key,
         model=binding.model,
         timeout=config.runtime.request_timeout_seconds,
     )
-    return Answering(store, bus, chat, binding.model)
+
+
+def _embedder(config: AppConfig) -> Embedder | None:
+    """The embedding client, or ``None``; without it retrieval stays keyword-only."""
+    binding = config.embedding
+    key = resolved_api_key(binding) if binding is not None else None
+    if binding is None or key is None:
+        return None
+    return Embedder(
+        url=binding.url,
+        api_key=key,
+        model=binding.model,
+        timeout=config.runtime.request_timeout_seconds,
+    )
+
+
+def _memory_stage(
+    config: AppConfig, store: Storage, chat: Chat | None, embedder: Embedder | None
+) -> MemoryBuilder | None:
+    """The memory builder, or ``None`` when neither half can be produced."""
+    if chat is None and embedder is None:
+        return None
+    model = config.supervisor.model if chat is not None and config.supervisor else ""
+    return MemoryBuilder(
+        store,
+        chat,
+        embedder,
+        model=model,
+        block_ms=config.runtime.coverage_block_seconds * 1000,
+    )
+
+
+def _answering_stage(
+    config: AppConfig,
+    store: Storage,
+    bus: EventBus,
+    chat: Chat | None,
+    embedder: Embedder | None,
+) -> Answering | None:
+    """The supervisor, or ``None`` when no conversation model can call out.
+
+    A job then fails at the answer step naming the missing model, which is more
+    honest than returning a transcript that nobody was asked to read.
+    """
+    if chat is None or config.supervisor is None:
+        return None
+    return Answering(store, bus, chat, config.supervisor.model, embedder)
 
 
 def _asr_stage(config: AppConfig, store: Storage, workspace: Workspace) -> AsrStage | None:

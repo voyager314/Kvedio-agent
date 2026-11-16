@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..core.domain import Segment, VideoRecord
+from ..core.memory import VideoMemory
 from ..core.storage import Storage
 
 MAX_SPAN_CHARS = 160
@@ -20,6 +21,7 @@ MAX_EVIDENCE_CHARS = 6_000  # the single-response evidence ceiling from the desi
 MAX_SEARCH_RESULTS = 10
 MAX_RANGE_SEGMENTS = 40
 SAMPLE_SEGMENTS = 24
+OVERVIEW_ANCHORS = 6  # real segments kept beside the map, so a claim can be cited
 
 
 @dataclass(frozen=True)
@@ -59,11 +61,16 @@ TOOLS: tuple[Tool, ...] = (
 
 @dataclass(frozen=True)
 class Evidence:
-    """One stretch of transcript handed to the model, with the moment it occupies."""
+    """One stretch of transcript handed to the model, with the moment it occupies.
+
+    ``verbatim`` is false for a map line: it describes a stretch instead of quoting
+    it, and the citation checker refuses to anchor a claim on words nobody said.
+    """
 
     start_ms: int
     end_ms: int
     text: str
+    verbatim: bool = True
 
 
 @dataclass(frozen=True)
@@ -78,10 +85,16 @@ class ToolBox:
     """The tools one question may use, with a shared evidence budget."""
 
     def __init__(
-        self, store: Storage, video: VideoRecord, *, budget: int = MAX_EVIDENCE_CHARS
+        self,
+        store: Storage,
+        video: VideoRecord,
+        memory: VideoMemory,
+        *,
+        budget: int = MAX_EVIDENCE_CHARS,
     ) -> None:
         self._store = store
         self._video = video
+        self._memory = memory
         self._remaining = max(0, budget)
 
     @property
@@ -103,22 +116,26 @@ class ToolBox:
         segments = self._store.transcript_segments(self._video.id)
         if not segments:
             return ToolResult((), "overview：转录为空")
-        step = max(1, len(segments) // SAMPLE_SEGMENTS)
-        sampled = segments[::step][:SAMPLE_SEGMENTS]
-        return self._pack(sampled, f"overview：{len(segments)} 段，抽样 {len(sampled)} 段")
+        blocks = self._memory.coverage()
+        if not blocks:
+            step = max(1, len(segments) // SAMPLE_SEGMENTS)
+            sampled = segments[::step][:SAMPLE_SEGMENTS]
+            return self._pack(sampled, f"overview：{len(segments)} 段，抽样 {len(sampled)} 段")
+        step = max(1, len(segments) // OVERVIEW_ANCHORS)
+        anchors = segments[::step][:OVERVIEW_ANCHORS]
+        evidence = [
+            Evidence(block.start_ms, block.end_ms, block.gist, verbatim=False) for block in blocks
+        ]
+        evidence += [Evidence(item.start_ms, item.end_ms, _clip(item.text)) for item in anchors]
+        return self._pack_evidence(
+            evidence, f"overview：地图 {len(blocks)} 块 + 抽样 {len(anchors)} 段"
+        )
 
     def _search(self, query: str) -> ToolResult:
         if not query.strip():
             return ToolResult((), "search：缺少关键词")
-        terms = query.split()
-        found = self._store.search_segments(self._video.id, terms, MAX_SEARCH_RESULTS)
-        note = f"search({query})：{len(found)} 段"
-        if not found and len(terms) == 1 and len(query.strip()) > 6:
-            found = self._store.search_segments(
-                self._video.id, _bigrams(query), MAX_SEARCH_RESULTS
-            )
-            note = f"search({query})：整句无命中，按 2 字片段找到 {len(found)} 段"
-        return self._pack(found, note)
+        found = self._memory.recall(query, limit=MAX_SEARCH_RESULTS)
+        return self._pack(found, f"search({query})：{len(found)} 段 · {self._memory.mode}")
 
     def _range(self, arguments: Mapping[str, Any]) -> ToolResult:
         start = _seconds(arguments.get("start"))
@@ -133,40 +150,30 @@ class ToolBox:
         return self._pack(segments, f"read_range({start}-{end}s)：{len(segments)} 段")
 
     def _pack(self, segments: Sequence[Segment], note: str) -> ToolResult:
-        """Fit the segments into the remaining budget, naming any shortfall."""
+        """Fit whole segments into the remaining budget."""
+        return self._pack_evidence(
+            [Evidence(item.start_ms, item.end_ms, _clip(item.text)) for item in segments], note
+        )
+
+    def _pack_evidence(self, evidence: Sequence[Evidence], note: str) -> ToolResult:
+        """Fit evidence into the remaining budget, naming any shortfall."""
         if self._remaining <= 0:
             return ToolResult((), f"{note}；证据预算已用尽")
-        evidence: list[Evidence] = []
+        kept: list[Evidence] = []
         used = 0
-        for segment in segments:
-            text = _clip(segment.text)
-            if used + len(text) > self._remaining:
-                note = f"{note}；证据预算不足，只取前 {len(evidence)} 段"
+        for item in evidence:
+            if used + len(item.text) > self._remaining:
+                note = f"{note}；证据预算不足，只取前 {len(kept)} 条"
                 break
-            used += len(text)
-            evidence.append(Evidence(segment.start_ms, segment.end_ms, text))
+            used += len(item.text)
+            kept.append(item)
         self._remaining -= used
-        return ToolResult(tuple(evidence), note)
+        return ToolResult(tuple(kept), note)
 
 
 def _clip(text: str) -> str:
     collapsed = " ".join(text.split())
     return collapsed if len(collapsed) <= MAX_SPAN_CHARS else collapsed[: MAX_SPAN_CHARS - 1] + "…"
-
-
-def _bigrams(text: str) -> list[str]:
-    """Two-character windows, deduplicated: a stand-in for a Chinese tokenizer.
-
-    A sentence searched as one substring matches nothing, because the transcript
-    has no whitespace to split on. Overlapping windows give the database something
-    to match without pretending to know where words begin.
-    """
-    cleaned = "".join(
-        character
-        for character in text
-        if not character.isspace() and character not in "，。！？、,.!?：:；;\"'“”‘’（）()"
-    )
-    return list(dict.fromkeys(cleaned[index : index + 2] for index in range(len(cleaned) - 1)))
 
 
 def _seconds(value: object) -> int | None:
