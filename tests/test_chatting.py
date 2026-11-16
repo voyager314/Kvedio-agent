@@ -9,16 +9,17 @@ from kvedio_agent1.core.supervisor import Chatting
 
 
 class ScriptedChat:
-    """Plays back one answer and keeps the prompt it was given."""
+    """Plays back the given replies in order, repeating the last one."""
 
-    def __init__(self, text: str) -> None:
-        self._text = text
+    def __init__(self, *texts: str) -> None:
+        self._texts = list(texts)
         self.calls: list[list] = []
 
     def complete(self, messages, *, json_mode: bool = False) -> Reply:
         self.calls.append(list(messages))
+        text = self._texts.pop(0) if len(self._texts) > 1 else self._texts[0]
         return Reply(
-            text=self._text, model="stub", prompt_tokens=0, completion_tokens=0
+            text=text, model="stub", prompt_tokens=0, completion_tokens=0
         )
 
 
@@ -79,27 +80,38 @@ def test_a_text_file_is_read_and_answered(store, tmp_path):
 
 def test_the_video_evidence_is_retrieved_without_delegation(store):
     video = prepare(store)
-    chat = ScriptedChat("预算还差二十万 [00:01]。")
+    chat = ScriptedChat(
+        '{"steps": ['
+        '{"tool": "overview", "arguments": {}, "why": "看全片"},'
+        '{"tool": "search", "arguments": {"query": "预算"}, "why": "查预算"}'
+        "]}",
+        "预算还差二十万 [00:01]。",
+    )
 
     reply = Chatting(store, chat).answer("预算多少", video=video)
 
-    prompt = chat.calls[0][0].content
+    prompt = chat.calls[-1][0].content
     assert "From the analysed video" in prompt
     assert "预算还差二十万" in prompt
     assert "[00:00]" in prompt
-    assert reply.notes
+    assert len(chat.calls) == 2  # one plan, one answer
+    assert "按计划执行 2 步" in reply.notes
 
 
-def test_a_visual_text_request_uses_scene_evidence(store):
+def test_the_plan_decides_which_tool_runs_not_the_wording(store):
     video = prepare(store)
     store.save_scene(
         video.id, "sk", 0, Scene(0, 4_000, "白板上写着预算", "/tmp/frame.jpg")
     )
-    chat = ScriptedChat("白板上写着预算 [00:01]。")
+    chat = ScriptedChat(
+        '{"steps": [{"tool": "scenes", "arguments": {}, "why": "看白板"}]}',
+        "白板上写着预算 [00:01]。",
+    )
 
-    reply = Chatting(store, chat).answer("画面里写了什么", video=video)
+    reply = Chatting(store, chat).answer("钱够吗", video=video)
 
-    prompt = chat.calls[0][0].content
+    # No picture word in the question; the plan still asks for the scenes.
+    prompt = chat.calls[-1][0].content
     assert "白板上写着预算" in prompt
     assert "(scene)" in prompt
     assert reply.text == "白板上写着预算 [00:01]。"

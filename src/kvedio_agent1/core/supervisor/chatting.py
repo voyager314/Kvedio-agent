@@ -2,14 +2,13 @@
 
 A text-only question, a referenced text file, or a question about material that
 is already analysed does not need a new video pass. This module reads the text
-file, pulls the relevant transcript and scene lines from the video on screen, and
-asks the conversation model to answer from that material. It never decodes media
+file, asks the planner which lookups to run over the video on screen, and has the
+conversation model answer from the evidence they return. It never decodes media
 and never starts a stage: delegation is the router's decision, not this module's.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,36 +18,9 @@ from ..domain import VideoRecord
 from ..llm import Chat, Embedder, Message
 from ..memory import VideoMemory
 from ..storage import Storage
+from .planner import make_plan
 
 MAX_TEXT_CHARS = 40_000
-MAX_QUERY_CHARS = 80
-_VISUAL_HINTS = ("画面", "屏幕", "镜头", "场景", "图表", "scene", "screen", "visible")
-_WORD = re.compile(r"[A-Za-z0-9_]{2,}")
-_STOPWORDS = frozenset(
-    {
-        "what",
-        "when",
-        "where",
-        "which",
-        "about",
-        "there",
-        "their",
-        "they",
-        "this",
-        "that",
-        "with",
-        "from",
-        "have",
-        "does",
-        "did",
-        "say",
-        "said",
-        "into",
-        "the",
-        "and",
-        "for",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -98,7 +70,13 @@ class Chatting:
     def _video_evidence(
         self, video: VideoRecord | None, question: str
     ) -> tuple[tuple[Evidence, ...], tuple[str, ...]]:
-        """The relevant transcript and scene lines, and a line saying what was tried."""
+        """Run the planned lookups and return their evidence, with a line per call.
+
+        The plan is the model's, not a fixed sweep: which tool to call, in what
+        order, and what to search for are judgements about the question, and a
+        keyword heuristic gets them wrong on paraphrases and on anything not
+        typed in the two languages it knows.
+        """
         if video is None:
             return (), ("没有在屏的视频。",)
         tools = _available(video, self._store)
@@ -110,49 +88,15 @@ class Chatting:
             VideoMemory(self._store, video, self._embedder),
             tools=tools,
         )
+        plan = make_plan(self._chat, question, tools)
         collected: dict[tuple[int, int, str], Evidence] = {}
-        notes: list[str] = []
-        term = _search_term(question)
-        steps = (
-            (
-                ("scenes", {}),
-                ("events", {}),
-                ("search", {"query": term}),
-                ("overview", {}),
-            )
-            if _looks_visual(question)
-            else (
-                ("overview", {}),
-                ("search", {"query": term}),
-                ("scenes", {}),
-                ("events", {}),
-            )
-        )
-        available = {tool.name for tool in tools}
-        for name, arguments in steps:
-            if name not in available:
-                continue
-            result = toolbox.call(name, arguments)
-            notes.append(result.note)
+        notes: list[str] = [plan.note]
+        for step in plan.steps:
+            result = toolbox.call(step.tool, step.arguments)
+            notes.append(f"{step.why} · {result.note}" if step.why else result.note)
             for item in result.evidence:
                 collected.setdefault((item.start_ms, item.end_ms, item.label), item)
         return tuple(collected[key] for key in sorted(collected)), tuple(notes)
-
-
-def _search_term(question: str) -> str:
-    """The most specific Latin token in the question, or the question itself."""
-    tokens = [
-        word for word in _WORD.findall(question) if word.lower() not in _STOPWORDS
-    ]
-    if not tokens:
-        return question[:MAX_QUERY_CHARS]
-    return max(tokens, key=len)
-
-
-def _looks_visual(question: str) -> bool:
-    """Whether the question is more likely to need the picture than the words."""
-    lowered = question.lower()
-    return any(hint.lower() in lowered for hint in _VISUAL_HINTS)
 
 
 def _available(video: VideoRecord, store: Storage) -> tuple[Tool, ...]:
