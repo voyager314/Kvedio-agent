@@ -10,7 +10,7 @@ from ..llm import Chat
 from ..storage import Storage, StorageError
 from ..tasks import EventBus
 from .planner import Plan, make_plan
-from .synthesis import write
+from .synthesis import Conclusion, write, write_absence
 
 Report = Callable[[float, str | None], None]
 
@@ -41,25 +41,24 @@ class Answering:
 
         toolbox = ToolBox(self._store, video)
         report(0.05, "生成计划")
-        plan = make_plan(self._chat, job.question, toolbox.catalogue(), toolbox.names)
+        plan = make_plan(self._chat, job.question, toolbox.tools)
         self._log(job, plan.note)
 
         evidence = self._gather(job, toolbox, plan, report)
         if not evidence:
-            text = f"转录里没有与「{job.question}」相关的片段。"
-            report(0.9, "没有可检索的证据")
-            self._log(job, text)
-            return self._store.record_answer(
-                job.id, video.id, job.question, text, self._model, ()
+            report(0.6, "没有检索到可用片段")
+            self._log(job, "没有检索到可用片段")
+            conclusion = Conclusion(
+                text=write_absence(self._chat, question=job.question), citations=()
             )
-
-        report(0.6, "撰写结论")
-        conclusion = write(
-            self._chat,
-            question=job.question,
-            evidence=evidence,
-            duration_ms=video.media.duration_ms if video.media is not None else 0,
-        )
+        else:
+            report(0.6, "撰写结论")
+            conclusion = write(
+                self._chat,
+                question=job.question,
+                evidence=evidence,
+                duration_ms=video.media.duration_ms if video.media is not None else 0,
+            )
         report(0.95, "保存结论")
         answer = self._store.record_answer(
             job.id, video.id, job.question, conclusion.text, self._model, conclusion.citations
@@ -75,7 +74,7 @@ class Answering:
         total = max(1, len(plan.steps))
         for index, step in enumerate(plan.steps, start=1):
             result = toolbox.call(step.tool, step.arguments)
-            self._log(job, f"{step.why or step.tool} · {result.note}")
+            self._log(job, f"{step.why} · {result.note}" if step.why else result.note)
             for item in result.evidence:
                 collected.setdefault((item.start_ms, item.end_ms), item)
             report(0.1 + 0.45 * index / total, None)

@@ -6,11 +6,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ...tools import Evidence
-from ..domain import Citation, format_moment
+from ..domain import Citation
 from ..llm import Chat, Message
 from . import citations, prompts
 
-REPAIR = "上一版结论的问题：{problem}。请只引用给定片段中出现的时间点，重新回答。"
+REPAIR_SAMPLES = 4  # how many allowed moments the correction shows as examples
 
 
 class UnsupportedCitation(Exception):
@@ -44,29 +44,45 @@ def write(
     """
     if not evidence:
         raise ValueError("没有可用的证据")
-    block = "\n".join(item.render() for item in evidence)
-    base = [
-        Message(
-            role="system",
-            content=prompts.render(
-                "answer",
-                evidence=block,
-                question=question,
-                duration=format_moment(duration_ms),
-            ),
-        )
-    ]
+    system = prompts.render(
+        "answer", question=question, evidence=evidence, duration_ms=duration_ms
+    )
+    base = [Message(role="system", content=system)]
 
     reply = chat.complete(base)
-    kept, problem = citations.check(reply.text, evidence)
-    if problem is None:
-        return Conclusion(text=reply.text.strip(), citations=kept)
+    verdict = citations.check(reply.text, evidence)
+    if verdict.ok:
+        return Conclusion(text=reply.text.strip(), citations=verdict.citations)
 
-    repair = Message(role="user", content=REPAIR.format(problem=problem))
-    second = chat.complete(
-        [*base, Message(role="assistant", content=reply.text), repair]
+    repair = prompts.render(
+        "repair",
+        missing=verdict.missing,
+        cited=verdict.cited,
+        evidence=evidence,
+        limit=REPAIR_SAMPLES,
     )
-    kept, problem = citations.check(second.text, evidence)
-    if problem is not None:
-        raise UnsupportedCitation(problem)
-    return Conclusion(text=second.text.strip(), citations=kept)
+    second = chat.complete(
+        [*base, Message(role="assistant", content=reply.text), Message(role="user", content=repair)]
+    )
+    verdict = citations.check(second.text, evidence)
+    if not verdict.ok:
+        raise UnsupportedCitation(_rejection(verdict))
+    return Conclusion(text=second.text.strip(), citations=verdict.citations)
+
+
+def _rejection(verdict: citations.Verdict) -> str:
+    """The failure message for the log and the panel; the prompt never carries this text."""
+    if not verdict.cited:
+        return "结论没有引用任何时间点"
+    return "结论引用了未检索到的时间点：" + "、".join(verdict.missing)
+
+
+def write_absence(chat: Chat, *, question: str) -> str:
+    """Say that the recording does not cover the question, in the question's language.
+
+    Retrieval found nothing, so there is no evidence to cite and no citation check
+    to run. The model is still asked because only the supervisor speaks to the
+    user, and a fixed sentence would answer in the wrong language half the time.
+    """
+    system = prompts.render("no_evidence", question=question)
+    return chat.complete([Message(role="system", content=system)]).text.strip()

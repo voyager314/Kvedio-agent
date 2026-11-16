@@ -12,6 +12,7 @@ from kvedio_agent1.core.supervisor.planner import MAX_STEPS, make_plan
 from kvedio_agent1.core.supervisor.synthesis import write
 from kvedio_agent1.core.tasks import EventBus
 from kvedio_agent1.tools import Evidence
+from kvedio_agent1.tools.transcript import TOOLS
 
 SEGMENTS = [
     Segment(start_ms=0, end_ms=5_000, text="今天先过一遍项目进度"),
@@ -56,28 +57,31 @@ def test_moments_and_ranges_are_read_from_the_text():
 
 
 def test_a_moment_inside_the_evidence_is_accepted():
-    kept, problem = rules.check("预算有缺口 [01:30]", [evidence(60_000, 120_000, "预算有缺口")])
-    assert problem is None
-    assert kept[0].quote == "预算有缺口"
-    assert (kept[0].start_ms, kept[0].end_ms) == (90_000, 91_000)
+    verdict = rules.check("预算有缺口 [01:30]", [evidence(60_000, 120_000, "预算有缺口")])
+    assert verdict.ok
+    assert verdict.citations[0].quote == "预算有缺口"
+    assert (verdict.citations[0].start_ms, verdict.citations[0].end_ms) == (90_000, 91_000)
 
 
 def test_a_moment_outside_the_evidence_is_refused():
-    kept, problem = rules.check("预算有缺口 [03:00]", [evidence(0, 60_000, "预算")])
-    assert kept == ()
-    assert "03:00" in (problem or "")
+    verdict = rules.check("预算有缺口 [03:00]", [evidence(0, 60_000, "预算")])
+    assert verdict.citations == ()
+    assert verdict.missing == ("[03:00]",)
+    assert verdict.ok is False
 
 
 def test_a_range_may_not_end_outside_the_evidence():
-    kept, problem = rules.check("这段讨论 [00:10-00:50]", [evidence(0, 30_000, "讨论")])
-    assert kept == ()
-    assert problem is not None
+    verdict = rules.check("这段讨论 [00:10-00:50]", [evidence(0, 30_000, "讨论")])
+    assert verdict.citations == ()
+    assert verdict.missing == ("[00:10]",)
+    assert verdict.ok is False
 
 
 def test_an_answer_without_any_moment_is_refused():
-    kept, problem = rules.check("大家都同意", [evidence(0, 1_000, "同意")])
-    assert kept == ()
-    assert problem is not None
+    verdict = rules.check("大家都同意", [evidence(0, 1_000, "同意")])
+    assert verdict.cited == 0
+    assert verdict.missing == ()
+    assert verdict.ok is False
 
 
 # --- planning -------------------------------------------------------------
@@ -85,27 +89,27 @@ def test_an_answer_without_any_moment_is_refused():
 
 def test_a_usable_plan_is_kept_in_order():
     chat = ScriptedChat([plan(("overview", {}), ("search", {"query": "预算"}))])
-    result = make_plan(chat, "预算够吗", "目录", frozenset({"overview", "search", "read_range"}))
+    result = make_plan(chat, "预算够吗", TOOLS)
     assert [step.tool for step in result.steps] == ["overview", "search"]
     assert "2 步" in result.note
 
 
 def test_a_plan_in_a_code_fence_is_still_read():
     chat = ScriptedChat([f"```json\n{plan(('overview', {}))}\n```"])
-    result = make_plan(chat, "讲了什么", "目录", frozenset({"overview"}))
+    result = make_plan(chat, "讲了什么", TOOLS)
     assert [step.tool for step in result.steps] == ["overview"]
 
 
 def test_a_plan_with_unknown_tools_falls_back():
     chat = ScriptedChat([plan(("download", {}))])
-    result = make_plan(chat, "讲了什么", "目录", frozenset({"overview", "search"}))
+    result = make_plan(chat, "讲了什么", TOOLS)
     assert [step.tool for step in result.steps] == ["overview", "search"]
     assert "固定检索" in result.note
 
 
 def test_prose_instead_of_json_falls_back():
     chat = ScriptedChat(["我先看看 transcript。"])
-    result = make_plan(chat, "讲了什么", "目录", frozenset({"overview"}))
+    result = make_plan(chat, "讲了什么", TOOLS)
     assert result.steps
     assert "固定检索" in result.note
 
@@ -113,7 +117,7 @@ def test_prose_instead_of_json_falls_back():
 def test_a_plan_is_truncated_to_the_step_ceiling():
     steps = [("overview", {})] * (MAX_STEPS + 3)
     chat = ScriptedChat([plan(*steps)])
-    result = make_plan(chat, "问题", "目录", frozenset({"overview"}))
+    result = make_plan(chat, "问题", TOOLS)
     assert len(result.steps) == MAX_STEPS
 
 
@@ -229,16 +233,17 @@ def test_the_loop_plans_searches_answers_and_records_citations(store):
     assert any("search(预算)" in note for note in notes)
 
 
-def test_the_loop_answers_without_a_model_when_nothing_matched(store):
+def test_the_loop_says_so_when_nothing_matched(store):
     video, job = prepare(store, question="天气怎么样")
-    chat = ScriptedChat([plan(("search", {"query": "天气"}))])
+    chat = ScriptedChat([plan(("search", {"query": "天气"})), "这段录像没有提到天气。"])
     bus = EventBus()
 
     answer = Answering(store, bus, chat, "chat-model").answer(job, lambda fraction, message: None)
 
-    assert "没有与「天气怎么样」相关" in answer.text
+    assert answer.text == "这段录像没有提到天气。"
     assert answer.citations == ()
-    assert len(chat.calls) == 1
+    assert len(chat.calls) == 2
+    assert "language of the question" in chat.calls[1][0].content.lower()
 
 
 def test_the_loop_refuses_to_answer_without_a_transcript(store):

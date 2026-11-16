@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ...tools import Tool
 from ..llm import Chat, Message
 from . import prompts
 
@@ -19,7 +20,7 @@ class Step:
 
     tool: str  # a name the toolbox listed
     arguments: Mapping[str, Any]  # tool-specific; validated by the tool itself
-    why: str  # one line the interface shows as the trace
+    why: str = ""  # one line the interface shows as the trace; empty when we wrote the step
 
 
 @dataclass(frozen=True)
@@ -31,7 +32,7 @@ class Plan:
 
 
 def make_plan(
-    chat: Chat, question: str, catalogue: str, names: frozenset[str]
+    chat: Chat, question: str, tools: Sequence[Tool], *, max_steps: int = MAX_STEPS
 ) -> Plan:
     """Ask the model for a plan, falling back to a fixed one when it cannot be used.
 
@@ -39,23 +40,21 @@ def make_plan(
     quietly worse answer. Only an unusable *reply* — prose, unknown tools, too
     many steps — degrades to the fixed plan, and the note says so.
     """
-    message = prompts.render(
-        "plan", catalogue=catalogue, question=question, max_steps=MAX_STEPS
-    )
+    message = prompts.render("plan", tools=tools, question=question, max_steps=max_steps)
     reply = chat.complete([Message(role="system", content=message)], json_mode=True)
-    steps = _parse(reply.text, names)
+    steps = _parse(reply.text, frozenset(tool.name for tool in tools), max_steps)
     if not steps:
         return Plan(_fallback(question), "计划不可用，改用固定检索")
     return Plan(steps, f"按计划执行 {len(steps)} 步")
 
 
-def _parse(text: str, names: frozenset[str]) -> tuple[Step, ...]:
+def _parse(text: str, names: frozenset[str], max_steps: int) -> tuple[Step, ...]:
     payload = _json_object(text)
     raw = payload.get("steps") if isinstance(payload, dict) else None
     if not isinstance(raw, list):
         return ()
     steps: list[Step] = []
-    for item in raw[:MAX_STEPS]:
+    for item in raw[:max_steps]:
         if not isinstance(item, dict):
             continue
         tool = item.get("tool")
@@ -85,8 +84,12 @@ def _json_object(text: str) -> dict[str, Any]:
 
 
 def _fallback(question: str) -> tuple[Step, ...]:
-    """The plan used when the model's plan cannot be read: look wide, then look for the question."""
+    """The plan used when the model's plan cannot be read: look wide, then look for the question.
+
+    No ``why`` is attached: these steps are ours, not the model's, and the tool's
+    own note is a truthful trace.
+    """
     return (
-        Step(tool="overview", arguments={}, why="先看整体分布"),
-        Step(tool="search", arguments={"query": question[:40]}, why="按问题关键词检索"),
+        Step(tool="overview", arguments={}),
+        Step(tool="search", arguments={"query": question[:40]}),
     )

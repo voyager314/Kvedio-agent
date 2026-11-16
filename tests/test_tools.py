@@ -57,7 +57,7 @@ def test_overview_samples_the_transcript(store):
     result = ToolBox(store, video).call("overview", {})
     assert len(result.evidence) == 3
     assert result.note.startswith("overview")
-    assert result.evidence[0].render().startswith("[00:00] ")
+    assert result.evidence[0].start_ms == 0
 
 
 def test_search_returns_the_matching_segments(store):

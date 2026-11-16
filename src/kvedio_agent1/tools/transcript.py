@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.domain import Segment, VideoRecord, format_moment
+from ..core.domain import Segment, VideoRecord
 from ..core.storage import Storage
 
 MAX_SPAN_CHARS = 160
@@ -21,7 +21,40 @@ MAX_SEARCH_RESULTS = 10
 MAX_RANGE_SEGMENTS = 40
 SAMPLE_SEGMENTS = 24
 
-TOOL_NAMES = frozenset({"overview", "search", "read_range"})
+
+@dataclass(frozen=True)
+class Tool:
+    """One capability, described for the planner that chooses it.
+
+    ``summary`` and ``arguments`` are English because the model reads them; the
+    note a call returns is Chinese because the user reads that.
+    """
+
+    name: str
+    summary: str
+    arguments: Mapping[str, str]  # argument name -> what it means
+
+
+TOOLS: tuple[Tool, ...] = (
+    Tool(
+        name="overview",
+        summary="Sample the transcript evenly across the recording, to see which topics it covers.",
+        arguments={},
+    ),
+    Tool(
+        name="search",
+        summary="Find the stretches of transcript that mention a keyword or phrase.",
+        arguments={"query": "the words to look for, as they would be said"},
+    ),
+    Tool(
+        name="read_range",
+        summary="Read everything said between two moments of the recording.",
+        arguments={
+            "start": "first second, as a whole number",
+            "end": "last second, as a whole number; must be greater than start",
+        },
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -31,10 +64,6 @@ class Evidence:
     start_ms: int
     end_ms: int
     text: str
-
-    def render(self) -> str:
-        """One line the model can cite: the position in brackets, then the words."""
-        return f"[{format_moment(self.start_ms)}] {self.text}"
 
 
 @dataclass(frozen=True)
@@ -56,18 +85,9 @@ class ToolBox:
         self._remaining = max(0, budget)
 
     @property
-    def names(self) -> frozenset[str]:
-        return TOOL_NAMES
-
-    def catalogue(self) -> str:
-        """One line per tool, written for the planning model."""
-        return "\n".join(
-            (
-                "overview：给出录像里均匀抽样的片段，用来判断话题分布，无参数。",
-                'search：按关键词找片段，参数 {"query": "关键词"}。',
-                'read_range：取某段时间内的片段，参数 {"start": 起始秒, "end": 结束秒}。',
-            )
-        )
+    def tools(self) -> tuple[Tool, ...]:
+        """The catalogue a planner chooses from; the same list this box can dispatch."""
+        return TOOLS
 
     def call(self, name: str, arguments: Mapping[str, Any]) -> ToolResult:
         """Run one tool; an unknown name answers with a note instead of raising."""

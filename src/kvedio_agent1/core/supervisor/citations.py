@@ -24,6 +24,26 @@ class Span:
     end_ms: int
 
 
+@dataclass(frozen=True)
+class Verdict:
+    """What the check found: the citations that may be kept, and what was wrong.
+
+    ``missing`` holds the moments the answer cited that were not in the evidence,
+    already formatted the way they appeared. ``cited`` counts every moment the
+    answer named, valid or not, so "cited nothing" stays distinguishable from
+    "cited only the wrong thing" — the correction says different things for each.
+    """
+
+    citations: tuple[Citation, ...]
+    missing: tuple[str, ...]
+    cited: int
+
+    @property
+    def ok(self) -> bool:
+        """Whether the answer cites at least one moment and invents none."""
+        return self.cited > 0 and not self.missing
+
+
 def find(text: str) -> tuple[Span, ...]:
     """Every ``[mm:ss]`` or ``[mm:ss-mm:ss]`` the text contains, in reading order."""
     spans: list[Span] = []
@@ -38,7 +58,7 @@ def find(text: str) -> tuple[Span, ...]:
     return tuple(spans)
 
 
-def check(text: str, evidence: Sequence[Evidence]) -> tuple[tuple[Citation, ...], str | None]:
+def check(text: str, evidence: Sequence[Evidence]) -> Verdict:
     """Keep the citations the evidence supports and name the ones it does not.
 
     A citation is supported when its start falls inside a given segment; a range
@@ -47,8 +67,6 @@ def check(text: str, evidence: Sequence[Evidence]) -> tuple[tuple[Citation, ...]
     the transcript itself, never the model's paraphrase.
     """
     spans = find(text)
-    if not spans:
-        return (), "结论没有引用任何时间点"
     accepted: list[Citation] = []
     refused: list[str] = []
     seen: set[tuple[int, int]] = set()
@@ -64,9 +82,7 @@ def check(text: str, evidence: Sequence[Evidence]) -> tuple[tuple[Citation, ...]
         accepted.append(
             Citation(start_ms=span.start_ms, end_ms=span.end_ms, quote=holder.text)
         )
-    if refused:
-        return tuple(accepted), "这些时间点不在给定片段里：" + "、".join(sorted(set(refused)))
-    return tuple(accepted), None
+    return Verdict(citations=tuple(accepted), missing=tuple(refused), cited=len(spans))
 
 
 def _holder(span: Span, evidence: Sequence[Evidence]) -> Evidence | None:
