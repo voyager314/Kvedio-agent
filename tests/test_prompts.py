@@ -4,7 +4,7 @@ import pytest
 from jinja2 import UndefinedError
 
 from kvedio_agent1.core import prompts
-from kvedio_agent1.core.domain import format_moment
+from kvedio_agent1.core.domain import Scene, format_moment
 from kvedio_agent1.core.supervisor import citations
 from kvedio_agent1.tools import Evidence
 from kvedio_agent1.tools.transcript import TOOLS
@@ -107,3 +107,13 @@ def test_the_scene_prompt_carries_the_speech_and_the_stretch():
 def test_the_scene_prompt_says_when_nothing_was_said():
     text = prompts.render("scene", start_ms=0, end_ms=5_000, segments=())
     assert "No speech was transcribed" in text
+
+def test_the_events_prompt_lists_every_shot_and_the_ceiling():
+    scenes = [
+        Scene(0, 5_000, "白板上写着预算", "/tmp/0.jpg"),
+        Scene(5_000, 9_000, "镜头转向财务表", "/tmp/1.jpg"),
+    ]
+    text = prompts.render("events", duration_ms=9_000, scenes=scenes, max_events=7)
+    assert "[00:00-00:05] 白板上写着预算" in text
+    assert "[00:05-00:09] 镜头转向财务表" in text
+    assert "at most 7" in text

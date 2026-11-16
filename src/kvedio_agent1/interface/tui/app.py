@@ -425,6 +425,7 @@ class Workbench(App[None]):
         """Whether the map and the vector index exist, and how large they are."""
         blocks, vectors = self._store.memory_summary(video.id)
         scenes = len(self._store.scenes(video.id))
+        events = len(self._store.events(video.id))
         parts = []
         if blocks:
             parts.append(f"覆盖图 {blocks} 块")
@@ -432,6 +433,8 @@ class Workbench(App[None]):
             parts.append(f"向量 {vectors} 条")
         if scenes:
             parts.append(f"场景 {scenes} 个")
+        if events:
+            parts.append(f"事件 {events} 个")
         return "记忆：" + (" · ".join(parts) if parts else "未建立")
 
     def _render_evidence(self) -> None:
@@ -548,5 +551,7 @@ class Workbench(App[None]):
 def _span(citation: Citation) -> str:
     """``mm:ss`` for a single moment, ``mm:ss–mm:ss`` for a stretch."""
     if citation.end_ms - citation.start_ms <= 1_000:
-        return format_moment(citation.start_ms)
-    return f"{format_moment(citation.start_ms)}–{format_moment(citation.end_ms)}"
+        moment = format_moment(citation.start_ms)
+    else:
+        moment = f"{format_moment(citation.start_ms)}–{format_moment(citation.end_ms)}"
+    return f"画面 {moment}" if citation.kind == "scene" else moment

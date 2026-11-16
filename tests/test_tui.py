@@ -6,7 +6,7 @@ from textual.widgets import DataTable, Input, Static
 
 from kvedio_agent1.core.asr import AsrStage
 from kvedio_agent1.core.config import load_or_create
-from kvedio_agent1.core.domain import JobStatus, Segment
+from kvedio_agent1.core.domain import Citation, JobStatus, Segment
 from kvedio_agent1.core.llm import Reply
 from kvedio_agent1.core.memory import MemoryBuilder
 from kvedio_agent1.core.pipeline import Pipeline, Stages
@@ -14,6 +14,7 @@ from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.core.tasks import EventBus
 from kvedio_agent1.core.workspace import Workspace
 from kvedio_agent1.interface.tui import Workbench
+from kvedio_agent1.interface.tui.app import _span
 
 
 def spoken(audio: Path) -> list[Segment]:
@@ -186,7 +187,8 @@ def test_a_question_asked_while_busy_waits_and_reuses_the_transcript(
             for _ in range(200):
                 await pilot.pause(0.05)
                 jobs = store.jobs()
-                if len(jobs) == 2 and all(job.status is not JobStatus.RUNNING for job in jobs):
+                done = {JobStatus.SUCCEEDED, JobStatus.PARTIAL, JobStatus.FAILED}
+                if len(jobs) == 2 and all(job.status in done for job in jobs):
                     break
             jobs = store.jobs()
             assert len(jobs) == 2
@@ -205,3 +207,8 @@ def test_a_question_asked_while_busy_waits_and_reuses_the_transcript(
 
     asyncio.run(scenario())
     store.close()
+
+def test_a_scene_citation_is_marked_in_the_evidence_panel():
+    assert _span(Citation(start_ms=1_000, end_ms=2_000, quote="看", kind="scene")) == "画面 00:01"
+    assert _span(Citation(start_ms=1_000, end_ms=2_000, quote="说")) == "00:01"
+    assert _span(Citation(1_000, 9_000, "说")) == "00:01–00:09"

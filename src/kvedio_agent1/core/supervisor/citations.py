@@ -61,10 +61,11 @@ def find(text: str) -> tuple[Span, ...]:
 def check(text: str, evidence: Sequence[Evidence]) -> Verdict:
     """Keep the citations the evidence supports and name the ones it does not.
 
-    A citation is supported when its start falls inside a given segment; a range
-    additionally has to end inside one, so a conclusion cannot stretch from a
-    moment it saw to a moment it did not. The quote stored with each citation is
-    the transcript itself, never the model's paraphrase.
+    A citation is supported when its start falls inside given evidence; a range
+    additionally has to end inside it, so a conclusion cannot stretch from a
+    moment it saw to a moment it did not. When the same moment has both speech and
+    a picture, the speech wins: it is the stronger thing to quote. Only when nobody
+    was talking does a claim rest on what the frame showed.
     """
     spans = find(text)
     accepted: list[Citation] = []
@@ -80,24 +81,24 @@ def check(text: str, evidence: Sequence[Evidence]) -> Verdict:
             continue
         seen.add(key)
         accepted.append(
-            Citation(start_ms=span.start_ms, end_ms=span.end_ms, quote=holder.text)
+            Citation(
+                start_ms=span.start_ms,
+                end_ms=span.end_ms,
+                quote=holder.text,
+                kind=holder.label or "transcript",
+            )
         )
     return Verdict(citations=tuple(accepted), missing=tuple(refused), cited=len(spans))
 
 
 def _holder(span: Span, evidence: Sequence[Evidence]) -> Evidence | None:
-    anchored = next(
-        (
-            item
-            for item in evidence
-            if not item.label and item.start_ms <= span.start_ms < item.end_ms
-        ),
-        None,
-    )
-    if anchored is None:
+    citable = [item for item in evidence if item.label in ("", "scene")]
+    anchored = [item for item in citable if item.start_ms <= span.start_ms < item.end_ms]
+    if not anchored:
         return None
     if span.end_ms - span.start_ms > 1_000 and not any(
-        not item.label and item.start_ms < span.end_ms <= item.end_ms for item in evidence
+        item.start_ms < span.end_ms <= item.end_ms for item in citable
     ):
         return None
-    return anchored
+    spoken = [item for item in anchored if not item.label]
+    return spoken[0] if spoken else anchored[0]

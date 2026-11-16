@@ -30,7 +30,7 @@ from ..core.pipeline import Pipeline, Stages
 from ..core.storage import Storage, StorageError
 from ..core.supervisor import Answering
 from ..core.tasks import EventBus
-from ..core.vision import VisionBuilder
+from ..core.vision import EventBuilder, VisionBuilder
 from ..core.workspace import Workspace
 from .tui import Workbench
 from .tui.format import role_label
@@ -76,6 +76,7 @@ def _workbench() -> int:
             asr=_asr_stage(loaded.config, store, workspace),
             memory=_memory_stage(loaded.config, store, chat, embedder),
             vision=_vision_stage(loaded.config, store, workspace),
+            events=_events_stage(loaded.config, store, chat),
             answering=_answering_stage(loaded.config, store, bus, chat, embedder),
         )
         Workbench(loaded, store, Pipeline(store, bus, stages), bus).run()
@@ -146,6 +147,15 @@ def _vision_stage(
         ),
         workspace,
     )
+
+
+def _events_stage(
+    config: AppConfig, store: Storage, chat: Chat | None
+) -> EventBuilder | None:
+    """The event extractor, or ``None`` when no conversation model can call out."""
+    if chat is None or config.supervisor is None:
+        return None
+    return EventBuilder(store, chat, model=config.supervisor.model)
 
 
 def _answering_stage(

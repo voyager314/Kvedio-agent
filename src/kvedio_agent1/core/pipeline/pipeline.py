@@ -29,7 +29,7 @@ from ..memory import MemoryBuilder
 from ..storage import Storage, StorageError
 from ..supervisor import Answering
 from ..tasks import EventBus, Scheduler, TaskContext
-from ..vision import VisionBuilder
+from ..vision import EventBuilder, VisionBuilder
 from ..workspace import Workspace
 
 
@@ -54,6 +54,7 @@ class Stages:
     asr: AsrStage | None = None
     memory: MemoryBuilder | None = None
     vision: VisionBuilder | None = None
+    events: EventBuilder | None = None
     answering: Answering | Answerer | None = None
 
 
@@ -106,6 +107,7 @@ class Pipeline:
             "transcribe": self._transcribe,
             "memory": self._memory,
             "vision": self._vision,
+            "events": self._events,
             "answer": self._answer,
         }
         return self._scheduler.run(job, handlers)
@@ -128,9 +130,14 @@ class Pipeline:
             tasks.append(
                 NewTask(id="memory", agent="memory", action="build", depends_on=_tail(tasks))
             )
-        if self._needs_vision(video):
+        vision_needed = self._needs_vision(video)
+        if vision_needed:
             tasks.append(
                 NewTask(id="vision", agent="vision", action="describe", depends_on=_tail(tasks))
+            )
+        if self._needs_events(video, after_vision=vision_needed):
+            tasks.append(
+                NewTask(id="events", agent="events", action="extract", depends_on=_tail(tasks))
             )
         tasks.append(
             NewTask(id="answer", agent="supervisor", action="answer", depends_on=_tail(tasks))
@@ -156,6 +163,14 @@ class Pipeline:
         builder = self._stages.vision
         if builder is None:
             return False
+        return not builder.current(video)
+
+    def _needs_events(self, video: VideoRecord, *, after_vision: bool) -> bool:
+        builder = self._stages.events
+        if builder is None:
+            return False
+        if after_vision:
+            return True  # the shots are about to change, so the events must follow them
         return not builder.current(video)
 
     def _needs_transcript(self, video: VideoRecord) -> bool:
@@ -256,6 +271,18 @@ class Pipeline:
         context.report(0.0, "识别场景")
         stats = builder.build(video, context.report)
         self._log(context, f"场景完成：{stats.described}/{stats.scenes} 个已描述")
+        context.report(1.0)
+
+    def _events(self, context: TaskContext) -> None:
+        """Name the events the shots belong to, so a reader can find a stretch."""
+        builder = self._stages.events
+        if builder is None:
+            context.report(1.0)
+            return
+        video = self._video(context)
+        context.report(0.0, "抽取事件")
+        stats = builder.build(video, context.report)
+        self._log(context, f"事件完成：{stats.events} 个")
         context.report(1.0)
 
     def _answer(self, context: TaskContext) -> None:

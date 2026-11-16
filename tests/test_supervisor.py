@@ -280,11 +280,24 @@ def test_a_map_line_cannot_be_cited():
     assert verdict.ok is False
 
 
-def test_a_scene_line_is_not_a_quotation_either():
+def test_a_scene_line_can_be_cited_when_nobody_was_talking():
     verdict = rules.check("[00:00]", [evidence(0, 10_000, "白板上写着预算").__class__(
         start_ms=0, end_ms=10_000, text="白板上写着预算", label="scene"
     )])
-    assert verdict.ok is False
+    assert verdict.ok is True
+    assert verdict.citations[0].kind == "scene"
+    assert verdict.citations[0].quote == "白板上写着预算"
+
+
+def test_speech_wins_over_the_picture_at_the_same_moment():
+    scene = evidence(0, 10_000, "白板上写着预算").__class__(
+        start_ms=0, end_ms=10_000, text="白板上写着预算", label="scene"
+    )
+    spoken = evidence(0, 10_000, "预算还差二十万")
+    verdict = rules.check("[00:02]", [scene, spoken])
+    assert verdict.ok is True
+    assert verdict.citations[0].kind == "transcript"
+    assert verdict.citations[0].quote == "预算还差二十万"
 
 def test_a_scene_and_speech_at_the_same_moment_are_both_kept(store):
     video, job = prepare(store)

@@ -54,6 +54,11 @@ TOOLS: tuple[Tool, ...] = (
         arguments={},
     ),
     Tool(
+        name="events",
+        summary="List the recording's events, each with what was on screen and what was said.",
+        arguments={},
+    ),
+    Tool(
         name="read_range",
         summary="Read everything said between two moments of the recording.",
         arguments={
@@ -117,6 +122,8 @@ class ToolBox:
             return self._search(str(arguments.get("query", "")))
         if name == "scenes":
             return self._scenes()
+        if name == "events":
+            return self._events()
         if name == "read_range":
             return self._range(arguments)
         return ToolResult((), f"{name}：没有这个工具")
@@ -156,6 +163,32 @@ class ToolBox:
         ]
         return self._pack_evidence(evidence, f"scenes：{len(scenes)} 个场景")
 
+    def _events(self) -> ToolResult:
+        events = self._store.events(self._video.id)
+        if not events:
+            return ToolResult((), "events：没有事件")
+        scenes = self._store.scenes(self._video.id)
+        segments = self._store.transcript_segments(self._video.id)
+        evidence = []
+        for event in events:
+            seeing = [
+                scene.description for scene in scenes if _overlaps(scene, event)
+            ][:2]
+            saying = [segment.text for segment in segments if _overlaps(segment, event)][:3]
+            parts = [f"{event.title}：{event.summary}"]
+            if seeing:
+                parts.append("画面：" + "；".join(seeing))
+            if saying:
+                parts.append("同期声：" + "；".join(saying))
+            evidence.append(
+                Evidence(
+                    event.start_ms, event.end_ms, _clip("｜".join(parts)), label="event"
+                )
+            )
+        return self._pack_evidence(
+            evidence, f"events：{len(events)} 个事件，已对齐画面与同期声"
+        )
+
     def _range(self, arguments: Mapping[str, Any]) -> ToolResult:
         start = _seconds(arguments.get("start"))
         end = _seconds(arguments.get("end"))
@@ -188,6 +221,11 @@ class ToolBox:
             kept.append(item)
         self._remaining -= used
         return ToolResult(tuple(kept), note)
+
+
+def _overlaps(left, right) -> bool:
+    """Whether two timed things share any moment of the recording."""
+    return left.start_ms < right.end_ms and left.end_ms > right.start_ms
 
 
 def _clip(text: str) -> str:

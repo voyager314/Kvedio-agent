@@ -2,7 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from kvedio_agent1.core.domain import Chunk, Coverage, MediaInfo, Scene, Segment
+from kvedio_agent1.core.domain import (
+    Chunk,
+    Coverage,
+    MediaInfo,
+    Scene,
+    Segment,
+    TimelineEvent,
+)
 from kvedio_agent1.core.memory import VideoMemory
 from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.tools import ToolBox
@@ -145,3 +152,19 @@ def test_the_map_lines_are_labelled(store):
     store.save_coverage(video.id, "ck", 0, Coverage(0, 20_000, "整段都在谈预算"))
     result = box(store, video).call("overview", {})
     assert any(item.label == "map" for item in result.evidence)
+
+def test_the_events_tool_aligns_the_picture_with_the_speech(store):
+    video = prepare(store, SEGMENTS)
+    store.save_scene(video.id, "sk", 0, Scene(0, 12_000, "白板上写着预算", "/tmp/f.jpg"))
+    store.replace_events(
+        video.id, "ek", [TimelineEvent(0, 12_000, "预算评审", "决定补二十万")]
+    )
+
+    result = box(store, video).call("events", {})
+
+    text = result.evidence[0].text
+    assert text.startswith("预算评审：决定补二十万")
+    assert "画面：白板上写着预算" in text
+    assert "同期声：" in text and "预算" in text
+    assert result.evidence[0].label == "event"
+    assert "已对齐" in result.note

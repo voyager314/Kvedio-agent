@@ -11,7 +11,7 @@ from kvedio_agent1.core.memory import MemoryBuilder
 from kvedio_agent1.core.pipeline import Pipeline, Stages
 from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.core.tasks import EventBus
-from kvedio_agent1.core.vision import VisionStats
+from kvedio_agent1.core.vision import EventStats, VisionStats
 from kvedio_agent1.core.workspace import Workspace
 
 
@@ -31,7 +31,9 @@ def spoken(audio: Path) -> list[Segment]:
     return [Segment(start_ms=0, end_ms=500, text="开场")]
 
 
-def build(store, workspace, answering, transcribe=spoken, memory=None, vision=None, **runtime):
+def build(
+    store, workspace, answering, transcribe=spoken, memory=None, vision=None, events=None, **runtime
+):
     bus = EventBus()
     asr = None
     if transcribe is not None:
@@ -50,6 +52,7 @@ def build(store, workspace, answering, transcribe=spoken, memory=None, vision=No
         asr=asr,
         memory=memory,
         vision=vision,
+        events=events,
         answering=answering,
     )
     return Pipeline(store, bus, stages), bus
@@ -236,3 +239,35 @@ def test_vision_runs_after_memory(store, workspace, answerer, sample_video):
         "answer",
     ]
     assert vision.builds == 1
+
+class _Events:
+    """An extractor with no events yet: like the real one before any shot exists."""
+
+    def __init__(self) -> None:
+        self.builds = 0
+
+    def current(self, video) -> bool:
+        return self.builds > 0
+
+    def build(self, video, report) -> EventStats:
+        self.builds += 1
+        report(1.0, "事件")
+        return EventStats(events=2)
+
+
+def test_events_follow_a_fresh_vision_run(store, workspace, answerer, sample_video):
+    vision, events = _Vision(), _Events()
+    pipeline, _ = build(store, workspace, answerer, vision=vision, events=events)
+
+    finished = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
+
+    assert finished.status is JobStatus.SUCCEEDED, finished.error
+    assert [task.id for task in store.tasks_for_job(finished.id)] == [
+        "probe",
+        "audio",
+        "transcribe",
+        "vision",
+        "events",
+        "answer",
+    ]
+    assert events.builds == 1
