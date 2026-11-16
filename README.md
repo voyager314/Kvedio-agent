@@ -33,7 +33,7 @@ uv run kvedio-agent1 doctor     # 检查配置、数据库与解码器
 
 - `src/kvedio_agent1/core/` — 引擎：领域值、配置、存储、任务调度、媒体探测、转录流水线、监督者
 - `src/kvedio_agent1/tools/` — 监督者可调用的工具：转录概览、关键词检索、按区间取段
-- `src/kvedio_agent1/prompts/` — 计划与作答的提示词模板
+- `src/kvedio_agent1/prompts/` — 计划与作答的提示词模板（Jinja2、英文；回答语言随提问）
 - `src/kvedio_agent1/interface/` — 终端界面、输入语法、进程入口
 - `docs/design/system.md` — 模块职责、数据模型、任务状态机、并发与上下文策略
 - `AGENTS.md` — 仓库规则与源码目录分类

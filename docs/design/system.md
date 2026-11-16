@@ -74,7 +74,7 @@
 | `core/video/` | 视觉理解：抽帧策略、帧描述、事件抽取 | M4 |
 | `interface/` | 终端界面：子命令、屏幕、面板、事件泵、输入语法 | M0 |
 | `tools/` | 暴露给监督者的工具实现，一族一模块：转录检索 | M2 |
-| `prompts/` | 提示词模板：计划与作答 | M2 |
+| `prompts/` | 提示词模板：Jinja2，纯英文，作答语言随提问 | M2 |
 | `default/` | 随包分发的默认文件：配置样例 | M0 |
 | `temp/` | 一次性脚本与试验产物，被 `.gitignore` 覆盖，不入库 | — |
 
@@ -327,6 +327,8 @@ runtime:
 
 计划由模型给出，最多 4 步；计划不可解析时退回固定两步（overview + 用问题检索），并在轨迹里说明。没有"反思循环"：一次计划、一次作答，引用不合格时只允许一次纠正重试。
 
+提示词是英文的 Jinja2 模板，工具清单、证据行、纠正示例都由模板循环渲染，时间戳统一走 `moment` 过滤器——格式只有一处定义，提示词与解析器不会各说一套。只有监督者与用户对话，所以作答模板把语言交给提问：指令英文，回答随用户。检索为空时仍调用一次模型，也是为这条规则服务——一句写死的中文说明在英文提问下必然答错语言。
+
 两种记忆分开：会话记忆是当前对话与任务状态，随会话消失；视频记忆是库里的转录、场景与索引，跨会话存在，只通过工具访问。二者不共享上下文窗口。
 
 ## 10. 界面
@@ -364,19 +366,21 @@ runtime:
 - 检查点：每片成功后一个事务写入分段与该片标记；同一片重复写入覆盖而不追加。
 - 界面：时间轴显示段数、覆盖区间与模型；无音轨、无语音各有明确文案。
 
-验收：同一视频二次分析不再发起任何请求（`test_a_finished_transcript_costs_nothing_on_a_second_run`）；中断后重跑只补未完成分片（`test_a_crashed_run_keeps_the_chunks_it_finished`）；换模型重建而不混两份（`test_changing_the_model_rebuilds_instead_of_mixing`）；无音轨视频不产生转录且作业仍成功。真实 socket 端到端验证过：10 秒视频切 3 片、3 次请求都命中配置路径、6 段落在 0–9200ms。
+验收：同一视频二次分析不再发起任何请求（`test_a_finished_transcript_costs_nothing_on_a_second_run`）；中断后重跑只补未完成分片（`test_a_crashed_run_keeps_the_chunks_it_finished`）；换模型重建而不混两份（`test_changing_the_model_rebuilds_instead_of_mixing`）；无音轨视频不产生转录，作业停在作答节点并写明"没有音轨"。真实 socket 端到端验证过：10 秒视频切 3 片、3 次请求都命中配置路径、6 段落在 0–9200ms。
 
 不做 VAD 与说话人分离：分片边界用能量最低点近似，足够避免切断句子；需要区分"谁在说"时再引入检测模型。
 
 **M2 监督者（已实现）**
 - 追问：直接输入一句话就是对当前视频的提问；任务图按已有产物裁剪，已转写过的视频只跑作答节点。
+- 提示词：英文 Jinja2 模板（`prompts/*.j2`）。工具清单由模板循环渲染，证据行与时间戳走同一个 `moment` 过滤器，引用格式在模板里写、由解析器读，两者有测试对拍。模板里没有一句中文（有测试守着），也没有一段提示词写在 Python 里。
+- 语言：只有监督者直接与用户对话，因此作答与"没找到"两个模板都要求按提问的语言回答；英文只用于指令本身。
 - 计划：模型输出 JSON 步骤（最多 4 步），校验工具名与参数；不可解析时退回 overview + 关键词检索，并在轨迹里说明。
 - 工具：`overview` / `search` / `read_range`，共享 6000 字符证据预算，用尽时返回"预算不足"而不是继续塞。
 - 结论：必须用 `[分:秒]` 或 `[分:秒-分:秒]` 标注依据，时间点要落在已检索到的片段内。
 - 引用校验：不合格先带着错误时间点纠正重试一次，仍不合格则作业失败——不保存无法追溯的结论。引用的 `quote` 取转录原文，不取模型转述。
 - 存储：`answer` 一作业一条，`answer_citation` 保存时间点与该处原文。
 
-验收：已转写视频追问只跑 `answer`（`test_a_second_question_reuses_every_finished_stage`）；编造时间点被拒（`test_one_repair_is_allowed_when_a_moment_was_invented`、`test_a_second_unsupported_answer_is_refused`）；没有命中时不调用模型直接说明（`test_the_loop_answers_without_a_model_when_nothing_matched`）。本地假服务同时提供转写与对话时，界面依次出现"转录完成 2 段""按计划执行 2 步""结论引用了 1 处"与证据区的一条引用。
+验收：已转写视频追问只跑 `answer`（`test_a_second_question_reuses_every_finished_stage`）；编造时间点被拒（`test_one_repair_is_allowed_when_a_moment_was_invented`、`test_a_second_unsupported_answer_is_refused`）；检索为空时模型用提问的语言说明没有找到（`test_the_loop_says_so_when_nothing_matched`）。本地假服务同时提供转写与对话时，界面依次出现"转录完成 2 段""按计划执行 2 步""结论引用了 1 处"与证据区的一条引用。
 
 **M3 记忆与检索**：关键词索引、向量索引、覆盖图、按问题取证。
 验收：小时级视频的提问在固定证据预算内作答，并记录定位误差。
