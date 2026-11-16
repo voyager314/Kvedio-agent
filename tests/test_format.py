@@ -5,6 +5,7 @@ from kvedio_agent1.core.domain import JobStatus, TaskStatus
 from kvedio_agent1.interface.tui.format import (
     agent_label,
     binding_label,
+    format_container,
     format_duration,
     format_progress,
     format_size,
@@ -39,6 +40,11 @@ def test_progress_is_rendered_as_whole_percent(value, expected):
 def test_size_reads_in_megabytes_and_drops_to_kilobytes():
     assert format_size(2 * 1024 * 1024) == "2.0 MB"
     assert format_size(20 * 1024) == "20 KB"
+
+
+def test_a_container_reads_as_its_demuxer_family():
+    assert format_container("mov,mp4,m4a,3gp,3g2,mj2") == "mov"
+    assert format_container(None) == "未知"
 
 
 def test_a_configured_binding_shows_only_its_name():

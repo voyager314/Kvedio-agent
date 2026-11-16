@@ -35,6 +35,7 @@ from ..submission import USAGE, Command, Reference, parse_submission
 from .format import (
     agent_label,
     binding_label,
+    format_container,
     format_duration,
     format_progress,
     format_size,
@@ -334,6 +335,7 @@ class Workbench(App[None]):
             lines.extend(
                 [
                     f"时长　{format_duration(media.duration_ms)}",
+                    f"容器　{format_container(media.container)}",
                     f"画面　{media.video_codec or '无'}　{media.width}×{media.height}"
                     f"　{media.fps or 0:.2f} fps",
                     f"音轨　{media.audio_codec or '无'}　{media.sample_rate or 0} Hz"

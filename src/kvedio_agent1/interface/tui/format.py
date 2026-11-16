@@ -54,6 +54,17 @@ def format_size(size_bytes: int) -> str:
     return f"{size_bytes / 1024:.0f} KB"
 
 
+def format_container(name: str | None) -> str:
+    """The demuxer family behind a container string.
+
+    The decoder reports every alias of a format as one comma-separated name; the
+    first entry is the family a reader recognises.
+    """
+    if not name:
+        return "未知"
+    return name.split(",")[0]
+
+
 def role_label(role: Role) -> str:
     return _ROLE_LABELS[role]
 
