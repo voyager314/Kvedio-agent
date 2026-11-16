@@ -156,13 +156,13 @@ class Storage:
                     (job_id, video_id, question, JobStatus.QUEUED.value, moment),
                 )
                 self._connection.executemany(
-                    "INSERT INTO task (id, job_id, agent, action, status, depends_on,"
+                    "INSERT INTO task (job_id, id, agent, action, status, depends_on,"
                     " dependency_mode, attempt, max_attempts, progress)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0)",
                     [
                         (
-                            task.id,
                             job_id,
+                            task.id,
                             task.agent,
                             task.action,
                             TaskStatus.PENDING.value,
@@ -177,7 +177,7 @@ class Storage:
                     "SELECT * FROM job WHERE id = ?", (job_id,)
                 ).fetchone()
         except sqlite3.IntegrityError as exc:
-            raise StorageError(f"作业无法落库：视频 {video_id} 不存在或任务 id 冲突") from exc
+            raise StorageError(f"作业无法落库：视频 {video_id} 不存在") from exc
         return _job(row)
 
     def job(self, job_id: str) -> JobRecord | None:
@@ -220,12 +220,13 @@ class Storage:
         """Write the fields a node changes while it runs.
 
         Identity, dependency edges and the attempt ceiling are fixed at creation,
-        so a handler cannot rewrite the graph it is part of.
+        so a handler cannot rewrite the graph it is part of. A node id repeats
+        across jobs, so the write is scoped by job as well.
         """
         with self._lock, self._connection:
             cursor = self._connection.execute(
                 "UPDATE task SET status = ?, attempt = ?, progress = ?, started_at = ?,"
-                " finished_at = ?, error = ? WHERE id = ?",
+                " finished_at = ?, error = ? WHERE job_id = ? AND id = ?",
                 (
                     task.status.value,
                     task.attempt,
@@ -233,11 +234,12 @@ class Storage:
                     _optional_instant(task.started_at),
                     _optional_instant(task.finished_at),
                     task.error,
+                    task.job_id,
                     task.id,
                 ),
             )
             if cursor.rowcount == 0:
-                raise StorageError(f"任务不存在：{task.id}")
+                raise StorageError(f"任务不存在：{task.job_id}/{task.id}")
 
     def abandon_interrupted(self) -> list[str]:
         """Fail every job an earlier process left running, together with its unfinished nodes.

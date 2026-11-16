@@ -44,8 +44,8 @@ CREATE TABLE job (
 );
 
 CREATE TABLE task (
-    id              TEXT    PRIMARY KEY,
     job_id          TEXT    NOT NULL REFERENCES job(id),
+    id              TEXT    NOT NULL,
     agent           TEXT    NOT NULL,
     action          TEXT    NOT NULL,
     status          TEXT    NOT NULL,
@@ -56,10 +56,9 @@ CREATE TABLE task (
     progress        REAL    NOT NULL DEFAULT 0,
     started_at      TEXT,
     finished_at     TEXT,
-    error           TEXT
+    error           TEXT,
+    PRIMARY KEY (job_id, id)
 );
-
-CREATE INDEX idx_task_job ON task(job_id);
 """
 
 
