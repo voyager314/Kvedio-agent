@@ -424,13 +424,15 @@ class Workbench(App[None]):
     def _memory_line(self, video: VideoRecord) -> str:
         """Whether the map and the vector index exist, and how large they are."""
         blocks, vectors = self._store.memory_summary(video.id)
-        if blocks and vectors:
-            return f"记忆：覆盖图 {blocks} 块 · 向量 {vectors} 条"
-        if vectors:
-            return f"记忆：向量 {vectors} 条"
+        scenes = len(self._store.scenes(video.id))
+        parts = []
         if blocks:
-            return f"记忆：覆盖图 {blocks} 块"
-        return "记忆：未建立"
+            parts.append(f"覆盖图 {blocks} 块")
+        if vectors:
+            parts.append(f"向量 {vectors} 条")
+        if scenes:
+            parts.append(f"场景 {scenes} 个")
+        return "记忆：" + (" · ".join(parts) if parts else "未建立")
 
     def _render_evidence(self) -> None:
         panel = self.query_one("#evidence", Static)

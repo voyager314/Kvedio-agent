@@ -12,6 +12,7 @@ from .job import (
     TaskStatus,
 )
 from .memory import Coverage
+from .scene import Scene
 from .transcript import Chunk, Segment, Transcript, format_moment
 from .video import FileIdentity, MediaInfo, VideoRecord
 
@@ -29,6 +30,7 @@ __all__ = [
     "JobStatus",
     "MediaInfo",
     "NewTask",
+    "Scene",
     "Segment",
     "TaskRecord",
     "TaskStatus",

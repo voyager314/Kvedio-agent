@@ -23,13 +23,14 @@ from ..core.config import (
     load_or_create,
     resolved_api_key,
 )
-from ..core.llm import Chat, Embedder, Transcriber
+from ..core.llm import Chat, Embedder, Transcriber, Vision
 from ..core.media import decoder_version
 from ..core.memory import MemoryBuilder
 from ..core.pipeline import Pipeline, Stages
 from ..core.storage import Storage, StorageError
 from ..core.supervisor import Answering
 from ..core.tasks import EventBus
+from ..core.vision import VisionBuilder
 from ..core.workspace import Workspace
 from .tui import Workbench
 from .tui.format import role_label
@@ -74,6 +75,7 @@ def _workbench() -> int:
             workspace=workspace,
             asr=_asr_stage(loaded.config, store, workspace),
             memory=_memory_stage(loaded.config, store, chat, embedder),
+            vision=_vision_stage(loaded.config, store, workspace),
             answering=_answering_stage(loaded.config, store, bus, chat, embedder),
         )
         Workbench(loaded, store, Pipeline(store, bus, stages), bus).run()
@@ -123,6 +125,26 @@ def _memory_stage(
         embedder,
         model=model,
         block_ms=config.runtime.coverage_block_seconds * 1000,
+    )
+
+
+def _vision_stage(
+    config: AppConfig, store: Storage, workspace: Workspace
+) -> VisionBuilder | None:
+    """The scene describer, or ``None`` when no vision model can call out."""
+    binding = config.video
+    key = resolved_api_key(binding) if binding is not None else None
+    if binding is None or key is None:
+        return None
+    return VisionBuilder(
+        store,
+        Vision(
+            url=binding.url,
+            api_key=key,
+            model=binding.model,
+            timeout=config.runtime.request_timeout_seconds,
+        ),
+        workspace,
     )
 
 

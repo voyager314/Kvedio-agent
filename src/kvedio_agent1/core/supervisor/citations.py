@@ -90,14 +90,14 @@ def _holder(span: Span, evidence: Sequence[Evidence]) -> Evidence | None:
         (
             item
             for item in evidence
-            if item.verbatim and item.start_ms <= span.start_ms < item.end_ms
+            if not item.label and item.start_ms <= span.start_ms < item.end_ms
         ),
         None,
     )
     if anchored is None:
         return None
     if span.end_ms - span.start_ms > 1_000 and not any(
-        item.verbatim and item.start_ms < span.end_ms <= item.end_ms for item in evidence
+        not item.label and item.start_ms < span.end_ms <= item.end_ms for item in evidence
     ):
         return None
     return anchored

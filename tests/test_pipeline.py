@@ -11,6 +11,7 @@ from kvedio_agent1.core.memory import MemoryBuilder
 from kvedio_agent1.core.pipeline import Pipeline, Stages
 from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.core.tasks import EventBus
+from kvedio_agent1.core.vision import VisionStats
 from kvedio_agent1.core.workspace import Workspace
 
 
@@ -30,7 +31,7 @@ def spoken(audio: Path) -> list[Segment]:
     return [Segment(start_ms=0, end_ms=500, text="开场")]
 
 
-def build(store, workspace, answering, transcribe=spoken, memory=None, **runtime):
+def build(store, workspace, answering, transcribe=spoken, memory=None, vision=None, **runtime):
     bus = EventBus()
     asr = None
     if transcribe is not None:
@@ -48,6 +49,7 @@ def build(store, workspace, answering, transcribe=spoken, memory=None, **runtime
         workspace=workspace,
         asr=asr,
         memory=memory,
+        vision=vision,
         answering=answering,
     )
     return Pipeline(store, bus, stages), bus
@@ -203,3 +205,34 @@ def test_a_video_without_audio_cannot_be_answered(store, workspace, answerer, si
     tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
     assert tasks["transcribe"].status is TaskStatus.SUCCEEDED  # nothing to transcribe
     assert tasks["answer"].status is TaskStatus.FAILED
+
+class _Vision:
+    """A describer that records the call instead of looking at pixels."""
+
+    def __init__(self) -> None:
+        self.builds = 0
+
+    def current(self, video) -> bool:
+        return False
+
+    def build(self, video, report) -> VisionStats:
+        self.builds += 1
+        report(1.0, "场景")
+        return VisionStats(scenes=1, described=1)
+
+
+def test_vision_runs_after_memory(store, workspace, answerer, sample_video):
+    vision = _Vision()
+    pipeline, _ = build(store, workspace, answerer, vision=vision)
+
+    finished = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
+
+    assert finished.status is JobStatus.SUCCEEDED, finished.error
+    assert [task.id for task in store.tasks_for_job(finished.id)] == [
+        "probe",
+        "audio",
+        "transcribe",
+        "vision",
+        "answer",
+    ]
+    assert vision.builds == 1

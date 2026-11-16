@@ -97,3 +97,13 @@ def test_templates_carry_no_chinese():
             if any("\u4e00" <= character <= "\u9fff" for character in line):
                 offenders.append(f"{item.name}:{number}")
     assert offenders == []
+
+def test_the_scene_prompt_carries_the_speech_and_the_stretch():
+    text = prompts.render("scene", start_ms=0, end_ms=5_000, segments=EVIDENCE[:1])
+    assert "[00:00] 今天先过一遍项目进度" in text
+    assert "00:05" in text
+
+
+def test_the_scene_prompt_says_when_nothing_was_said():
+    text = prompts.render("scene", start_ms=0, end_ms=5_000, segments=())
+    assert "No speech was transcribed" in text

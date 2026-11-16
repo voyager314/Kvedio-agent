@@ -29,6 +29,7 @@ from ..memory import MemoryBuilder
 from ..storage import Storage, StorageError
 from ..supervisor import Answering
 from ..tasks import EventBus, Scheduler, TaskContext
+from ..vision import VisionBuilder
 from ..workspace import Workspace
 
 
@@ -52,6 +53,7 @@ class Stages:
     workspace: Workspace
     asr: AsrStage | None = None
     memory: MemoryBuilder | None = None
+    vision: VisionBuilder | None = None
     answering: Answering | Answerer | None = None
 
 
@@ -103,6 +105,7 @@ class Pipeline:
             "audio": self._audio,
             "transcribe": self._transcribe,
             "memory": self._memory,
+            "vision": self._vision,
             "answer": self._answer,
         }
         return self._scheduler.run(job, handlers)
@@ -125,6 +128,10 @@ class Pipeline:
             tasks.append(
                 NewTask(id="memory", agent="memory", action="build", depends_on=_tail(tasks))
             )
+        if self._needs_vision(video):
+            tasks.append(
+                NewTask(id="vision", agent="vision", action="describe", depends_on=_tail(tasks))
+            )
         tasks.append(
             NewTask(id="answer", agent="supervisor", action="answer", depends_on=_tail(tasks))
         )
@@ -143,6 +150,12 @@ class Pipeline:
             return False
         if after_transcript:
             return True  # the transcript is about to change, so the memory must follow it
+        return not builder.current(video)
+
+    def _needs_vision(self, video: VideoRecord) -> bool:
+        builder = self._stages.vision
+        if builder is None:
+            return False
         return not builder.current(video)
 
     def _needs_transcript(self, video: VideoRecord) -> bool:
@@ -227,6 +240,22 @@ class Pipeline:
         context.report(0.0, "建立记忆")
         stats = builder.build(video, context.report)
         self._log(context, f"记忆完成：覆盖图 {stats.blocks} 块 · 向量 {stats.vectors} 条")
+        context.report(1.0)
+
+    def _vision(self, context: TaskContext) -> None:
+        """Cut the recording into scenes and describe each one, skipping described ones."""
+        builder = self._stages.vision
+        if builder is None:
+            context.report(1.0)
+            return
+        video = self._video(context)
+        if video.media is not None and video.media.video_codec is None:
+            self._log(context, "没有视频轨，跳过场景")
+            context.report(1.0)
+            return
+        context.report(0.0, "识别场景")
+        stats = builder.build(video, context.report)
+        self._log(context, f"场景完成：{stats.described}/{stats.scenes} 个已描述")
         context.report(1.0)
 
     def _answer(self, context: TaskContext) -> None:

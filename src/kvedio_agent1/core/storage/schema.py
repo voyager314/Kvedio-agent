@@ -12,7 +12,7 @@ import sqlite3
 
 from .errors import StorageError
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _INITIAL = """
 CREATE TABLE video (
@@ -143,7 +143,36 @@ CREATE TABLE segment_vector (
 CREATE INDEX idx_vector_key ON segment_vector(video_id, cache_key, start_ms);
 """
 
-_MIGRATIONS: dict[int, str] = {1: _INITIAL, 2: _TRANSCRIPT, 3: _ANSWERS, 4: _MEMORY}
+_SCENES = """
+CREATE TABLE scene (
+    id          INTEGER PRIMARY KEY,
+    video_id    INTEGER NOT NULL REFERENCES video(id),
+    cache_key   TEXT    NOT NULL,
+    position    INTEGER NOT NULL,
+    start_ms    INTEGER NOT NULL,
+    end_ms      INTEGER NOT NULL,
+    frame_path  TEXT    NOT NULL,
+    description TEXT    NOT NULL,
+    model       TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL,
+    UNIQUE (video_id, cache_key, position)
+);
+
+CREATE TABLE scene_run (
+    video_id     INTEGER PRIMARY KEY REFERENCES video(id),
+    cache_key    TEXT    NOT NULL,
+    total        INTEGER NOT NULL,
+    completed_at TEXT    NOT NULL
+);
+"""
+
+_MIGRATIONS: dict[int, str] = {
+    1: _INITIAL,
+    2: _TRANSCRIPT,
+    3: _ANSWERS,
+    4: _MEMORY,
+    5: _SCENES,
+}
 
 
 def migrate(connection: sqlite3.Connection) -> None:

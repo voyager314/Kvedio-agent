@@ -27,6 +27,7 @@ from ..domain import (
     JobStatus,
     MediaInfo,
     NewTask,
+    Scene,
     Segment,
     TaskRecord,
     TaskStatus,
@@ -585,6 +586,87 @@ class Storage:
                 (video_id, video_id),
             ).fetchone()
         return int(row["blocks"]), int(row["vectors"])
+
+    def scenes(self, video_id: int) -> list[Scene]:
+        """Every described scene, in recording order."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT start_ms, end_ms, description, frame_path FROM scene"
+                " WHERE video_id = ? ORDER BY position",
+                (video_id,),
+            ).fetchall()
+        return [
+            Scene(
+                start_ms=row["start_ms"],
+                end_ms=row["end_ms"],
+                description=row["description"],
+                frame_path=row["frame_path"],
+            )
+            for row in rows
+        ]
+
+    def save_scene(self, video_id: int, cache_key: str, position: int, scene: Scene) -> None:
+        """Write one scene description; the same position under the same key replaces it."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO scene"
+                " (video_id, cache_key, position, start_ms, end_ms, frame_path,"
+                " description, model, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    video_id,
+                    cache_key,
+                    position,
+                    scene.start_ms,
+                    scene.end_ms,
+                    scene.frame_path,
+                    scene.description,
+                    "",
+                    _instant(_now()),
+                ),
+            )
+
+    def scene_positions(self, video_id: int, cache_key: str) -> set[int]:
+        """Positions already described under this key, so a rebuild resumes."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT position FROM scene WHERE video_id = ? AND cache_key = ?",
+                (video_id, cache_key),
+            ).fetchall()
+        return {row["position"] for row in rows}
+
+    def scene_count(self, video_id: int, cache_key: str) -> int:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT COUNT(*) AS total FROM scene WHERE video_id = ? AND cache_key = ?",
+                (video_id, cache_key),
+            ).fetchone()
+        return int(row["total"])
+
+    def prune_scenes(self, video_id: int, keep_key: str) -> None:
+        """Drop descriptions made from a different file or a different model."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM scene WHERE video_id = ? AND cache_key != ?",
+                (video_id, keep_key),
+            )
+
+    def scene_run(self, video_id: int) -> tuple[str, int] | None:
+        """The key and scene count of the last completed description run."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT cache_key, total FROM scene_run WHERE video_id = ?", (video_id,)
+            ).fetchone()
+        return (row["cache_key"], int(row["total"])) if row is not None else None
+
+    def save_scene_run(self, video_id: int, cache_key: str, total: int) -> None:
+        """Record that every detected scene now has a description."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO scene_run (video_id, cache_key, total, completed_at)"
+                " VALUES (?, ?, ?, ?)",
+                (video_id, cache_key, total, _instant(_now())),
+            )
 
     def abandon_interrupted(self) -> list[str]:
         """Fail every job an earlier process left running, together with its unfinished nodes.

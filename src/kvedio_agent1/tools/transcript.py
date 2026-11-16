@@ -49,6 +49,11 @@ TOOLS: tuple[Tool, ...] = (
         arguments={"query": "the words to look for, as they would be said"},
     ),
     Tool(
+        name="scenes",
+        summary="List the recording's shots with a description of what is visible in each.",
+        arguments={},
+    ),
+    Tool(
         name="read_range",
         summary="Read everything said between two moments of the recording.",
         arguments={
@@ -63,14 +68,16 @@ TOOLS: tuple[Tool, ...] = (
 class Evidence:
     """One stretch of transcript handed to the model, with the moment it occupies.
 
-    ``verbatim`` is false for a map line: it describes a stretch instead of quoting
-    it, and the citation checker refuses to anchor a claim on words nobody said.
+    ``label`` is empty for transcript lines. A map line is labelled ``map``: it
+    summarises a stretch instead of quoting it, and the citation checker refuses
+    to anchor a claim on words nobody said. A scene line is labelled ``scene``:
+    it describes what the picture showed, which is an observation of its own.
     """
 
     start_ms: int
     end_ms: int
     text: str
-    verbatim: bool = True
+    label: str = ""
 
 
 @dataclass(frozen=True)
@@ -108,6 +115,8 @@ class ToolBox:
             return self._overview()
         if name == "search":
             return self._search(str(arguments.get("query", "")))
+        if name == "scenes":
+            return self._scenes()
         if name == "read_range":
             return self._range(arguments)
         return ToolResult((), f"{name}：没有这个工具")
@@ -124,7 +133,7 @@ class ToolBox:
         step = max(1, len(segments) // OVERVIEW_ANCHORS)
         anchors = segments[::step][:OVERVIEW_ANCHORS]
         evidence = [
-            Evidence(block.start_ms, block.end_ms, block.gist, verbatim=False) for block in blocks
+            Evidence(block.start_ms, block.end_ms, block.gist, label="map") for block in blocks
         ]
         evidence += [Evidence(item.start_ms, item.end_ms, _clip(item.text)) for item in anchors]
         return self._pack_evidence(
@@ -136,6 +145,16 @@ class ToolBox:
             return ToolResult((), "search：缺少关键词")
         found = self._memory.recall(query, limit=MAX_SEARCH_RESULTS)
         return self._pack(found, f"search({query})：{len(found)} 段 · {self._memory.mode}")
+
+    def _scenes(self) -> ToolResult:
+        scenes = self._store.scenes(self._video.id)
+        if not scenes:
+            return ToolResult((), "scenes：没有场景描述")
+        evidence = [
+            Evidence(item.start_ms, item.end_ms, item.description, label="scene")
+            for item in scenes
+        ]
+        return self._pack_evidence(evidence, f"scenes：{len(scenes)} 个场景")
 
     def _range(self, arguments: Mapping[str, Any]) -> ToolResult:
         start = _seconds(arguments.get("start"))

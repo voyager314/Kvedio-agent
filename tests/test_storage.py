@@ -14,6 +14,7 @@ from kvedio_agent1.core.domain import (
     JobStatus,
     MediaInfo,
     NewTask,
+    Scene,
     Segment,
     TaskStatus,
 )
@@ -388,3 +389,17 @@ def test_memory_summary_counts_both_halves(store, tmp_path):
     assert store.memory_summary(video.id) == (0, 0)
     store.save_coverage(video.id, "ck", 0, Coverage(0, 60_000, "开场"))
     assert store.memory_summary(video.id)[0] == 1
+
+def test_scenes_round_trip_and_a_run_marks_completion(store, tmp_path):
+    video = reference(store, tmp_path)
+    store.save_scene(video.id, "sk", 0, Scene(0, 1_000, "白板上写着预算", "/tmp/a.jpg"))
+
+    assert [scene.description for scene in store.scenes(video.id)] == ["白板上写着预算"]
+    assert store.scene_positions(video.id, "sk") == {0}
+    assert store.scene_count(video.id, "sk") == 1
+
+    store.save_scene_run(video.id, "sk", 1)
+    assert store.scene_run(video.id) == ("sk", 1)
+
+    store.prune_scenes(video.id, "other-key")
+    assert store.scenes(video.id) == []

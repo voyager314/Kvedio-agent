@@ -55,7 +55,7 @@ def write(
     if verdict.ok:
         return Conclusion(text=reply.text.strip(), citations=verdict.citations)
 
-    examples = [item for item in evidence if item.verbatim][:REPAIR_SAMPLES]
+    examples = [item for item in evidence if not item.label][:REPAIR_SAMPLES]
     repair = prompts.render(
         "repair", missing=verdict.missing, cited=verdict.cited, examples=examples
     )

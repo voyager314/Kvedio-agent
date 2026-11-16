@@ -79,13 +79,15 @@ class Answering:
         self, job: JobRecord, toolbox: ToolBox, plan: Plan, report: Report
     ) -> tuple[Evidence, ...]:
         """Run the plan, keep the evidence in timeline order, and announce each step."""
-        collected: dict[tuple[int, int], Evidence] = {}
+        collected: dict[tuple[int, int, str], Evidence] = {}
         total = max(1, len(plan.steps))
         for index, step in enumerate(plan.steps, start=1):
             result = toolbox.call(step.tool, step.arguments)
             self._log(job, f"{step.why} · {result.note}" if step.why else result.note)
             for item in result.evidence:
-                collected.setdefault((item.start_ms, item.end_ms), item)
+                # The same stretch may arrive as a scene and as speech; both are
+                # evidence, and dropping one would drop the only citable copy.
+                collected.setdefault((item.start_ms, item.end_ms, item.label), item)
             report(0.1 + 0.45 * index / total, None)
         return tuple(collected[key] for key in sorted(collected))
 

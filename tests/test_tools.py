@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from kvedio_agent1.core.domain import Chunk, MediaInfo, Segment
+from kvedio_agent1.core.domain import Chunk, Coverage, MediaInfo, Scene, Segment
 from kvedio_agent1.core.memory import VideoMemory
 from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.tools import ToolBox
@@ -130,3 +130,18 @@ def test_long_segments_are_clipped_for_the_model(store):
     result = box(store, video).call("overview", {})
     assert result.evidence[0].text.endswith("…")
     assert len(result.evidence[0].text) <= 160
+
+def test_the_scenes_tool_returns_labelled_evidence(store):
+    video = prepare(store, SEGMENTS)
+    store.save_scene(video.id, "sk", 0, Scene(0, 5_000, "白板上写着预算", "/tmp/frame.jpg"))
+    result = box(store, video).call("scenes", {})
+    assert [item.label for item in result.evidence] == ["scene"]
+    assert result.evidence[0].text == "白板上写着预算"
+    assert result.note == "scenes：1 个场景"
+
+
+def test_the_map_lines_are_labelled(store):
+    video = prepare(store, SEGMENTS)
+    store.save_coverage(video.id, "ck", 0, Coverage(0, 20_000, "整段都在谈预算"))
+    result = box(store, video).call("overview", {})
+    assert any(item.label == "map" for item in result.evidence)

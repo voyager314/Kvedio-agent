@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from kvedio_agent1.core.domain import Chunk, MediaInfo, NewTask, Segment
+from kvedio_agent1.core.domain import Chunk, MediaInfo, NewTask, Scene, Segment
 from kvedio_agent1.core.llm import Message, Reply
 from kvedio_agent1.core.storage import Storage
 from kvedio_agent1.core.supervisor import Answering, UnsupportedCitation
@@ -271,3 +271,34 @@ def _drain(channel) -> list:
             collected.append(channel.get_nowait())
         except queue.Empty:
             return collected
+
+def test_a_map_line_cannot_be_cited():
+    verdict = rules.check("[00:00]", [evidence(0, 10_000, "整段在谈预算").__class__(
+        start_ms=0, end_ms=10_000, text="整段在谈预算", label="map"
+    )])
+    assert verdict.missing == ("[00:00]",)
+    assert verdict.ok is False
+
+
+def test_a_scene_line_is_not_a_quotation_either():
+    verdict = rules.check("[00:00]", [evidence(0, 10_000, "白板上写着预算").__class__(
+        start_ms=0, end_ms=10_000, text="白板上写着预算", label="scene"
+    )])
+    assert verdict.ok is False
+
+def test_a_scene_and_speech_at_the_same_moment_are_both_kept(store):
+    video, job = prepare(store)
+    store.save_scene(video.id, "sk", 0, Scene(0, 5_000, "白板上写着预算", "/tmp/frame.jpg"))
+    chat = ScriptedChat(
+        [
+            plan(("scenes", {}), ("overview", {})),
+            "预算写在白板上 [00:00]。",
+        ]
+    )
+
+    answer = Answering(store, EventBus(), chat, "chat-model").answer(
+        job, lambda fraction, message: None
+    )
+
+    # The citation is anchored on the speech at that moment, not on the picture line.
+    assert answer.citations[0].quote == "今天先过一遍项目进度"
