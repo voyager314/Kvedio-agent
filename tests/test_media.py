@@ -1,8 +1,41 @@
 import os
+import wave
 
 import pytest
 
-from kvedio_agent1.core.media import ProbeError, identify, probe
+from kvedio_agent1.core.media import (
+    NoAudioTrack,
+    ProbeError,
+    extract_audio,
+    identify,
+    probe,
+)
+
+
+def test_audio_is_extracted_to_a_sixteen_kilohertz_mono_wav(sample_video, tmp_path):
+    target = tmp_path / "audio.wav"
+    fractions: list[float] = []
+
+    track = extract_audio(
+        sample_video, target, expected_ms=1_000, progress=fractions.append
+    )
+
+    assert target.exists()
+    assert track.sample_rate == 16_000
+    assert track.duration_ms == pytest.approx(1_000, abs=60)
+    with wave.open(str(target), "rb") as written:
+        assert written.getnchannels() == 1
+        assert written.getsampwidth() == 2
+        assert written.getframerate() == 16_000
+    assert fractions and fractions == sorted(fractions)
+
+
+def test_an_interrupted_extraction_leaves_no_file(silent_video, tmp_path):
+    target = tmp_path / "audio.wav"
+    with pytest.raises(NoAudioTrack):
+        extract_audio(silent_video, target, expected_ms=1_000)
+    assert not target.exists()
+    assert not target.with_name("audio.wav.part").exists()
 
 
 def test_probing_reports_both_tracks(sample_video):

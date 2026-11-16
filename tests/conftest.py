@@ -1,7 +1,11 @@
+import wave
 from pathlib import Path
 
 import av
+import numpy as np
 import pytest
+
+RATE = 16_000
 
 
 @pytest.fixture
@@ -12,6 +16,28 @@ def home(tmp_path, monkeypatch):
     return target
 
 
+@pytest.fixture
+def make_wav(tmp_path):
+    """Build mono 16 kHz WAV files from ``(duration_ms, amplitude)`` pairs."""
+
+    def factory(pattern: list[tuple[int, float]], name: str = "audio.wav") -> Path:
+        target = tmp_path / name
+        with wave.open(str(target), "wb") as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(RATE)
+            for duration_ms, amplitude in pattern:
+                count = RATE * duration_ms // 1000
+                if amplitude:
+                    samples = np.sin(np.arange(count) / 20) * amplitude
+                else:
+                    samples = np.zeros(count)
+                out.writeframes(samples.astype(np.int16).tobytes())
+        return target
+
+    return factory
+
+
 @pytest.fixture(scope="session")
 def sample_video(tmp_path_factory) -> Path:
     """A one-second mp4 with one video and one audio track, encoded by the decoder itself.
@@ -20,11 +46,26 @@ def sample_video(tmp_path_factory) -> Path:
     binary payloads and makes the expected stream layout explicit in code.
     """
     target = tmp_path_factory.mktemp("media") / "sample.mp4"
+    _write_video(target, with_audio=True)
+    return target
+
+
+@pytest.fixture(scope="session")
+def silent_video(tmp_path_factory) -> Path:
+    """A one-second mp4 with no audio track: the path a stage must treat as finished, not broken."""
+    target = tmp_path_factory.mktemp("media") / "silent.mp4"
+    _write_video(target, with_audio=False)
+    return target
+
+
+def _write_video(target: Path, *, with_audio: bool) -> None:
     container = av.open(str(target), mode="w")
     video = container.add_stream("libx264", rate=25)
     video.width, video.height, video.pix_fmt = 160, 120, "yuv420p"
-    audio = container.add_stream("aac", rate=48_000)
-    audio.layout = "stereo"
+    audio = None
+    if with_audio:
+        audio = container.add_stream("aac", rate=48_000)
+        audio.layout = "stereo"
 
     for index in range(25):
         frame = av.VideoFrame(160, 120, "yuv420p")
@@ -35,16 +76,17 @@ def sample_video(tmp_path_factory) -> Path:
         for packet in video.encode(frame):
             container.mux(packet)
 
-    for index in range(47):
-        frame = av.AudioFrame(format="s16", layout="stereo", samples=1024)
-        frame.sample_rate = 48_000
-        frame.pts = index * 1024
-        for plane in frame.planes:
-            plane.update(bytes(plane.buffer_size))
-        for packet in audio.encode(frame):
-            container.mux(packet)
+    if audio is not None:
+        for index in range(47):
+            frame = av.AudioFrame(format="s16", layout="stereo", samples=1024)
+            frame.sample_rate = 48_000
+            frame.pts = index * 1024
+            for plane in frame.planes:
+                plane.update(bytes(plane.buffer_size))
+            for packet in audio.encode(frame):
+                container.mux(packet)
 
-    for packet in (*video.encode(None), *audio.encode(None)):
+    trailing = video.encode(None) if audio is None else (*video.encode(None), *audio.encode(None))
+    for packet in trailing:
         container.mux(packet)
     container.close()
-    return target
