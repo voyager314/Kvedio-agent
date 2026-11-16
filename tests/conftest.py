@@ -23,7 +23,7 @@ class StubAnswerer:
         self._text = text
         self._quote = quote
 
-    def answer(self, job, report, *, cancelled=None):
+    def answer(self, job, report, *, cancelled=None, preliminary=False):
         transcript = self._store.transcript(job.video_id)
         if transcript is not None and transcript.ready:
             quote, kind = self._quote, "transcript"
@@ -40,6 +40,7 @@ class StubAnswerer:
             self._text,
             "stub",
             (Citation(start_ms=0, end_ms=600, quote=quote, kind=kind),),
+            stage="partial" if preliminary else "final",
         )
 
 

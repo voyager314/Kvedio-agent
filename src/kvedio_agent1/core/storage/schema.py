@@ -12,7 +12,7 @@ import sqlite3
 
 from .errors import StorageError
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _INITIAL = """
 CREATE TABLE video (
@@ -205,6 +205,11 @@ CREATE TABLE usage (
 CREATE INDEX idx_usage_time ON usage(created_at);
 """
 
+_ANSWER_REVISIONS = """
+ALTER TABLE answer ADD COLUMN stage TEXT NOT NULL DEFAULT 'final';
+ALTER TABLE answer ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _INITIAL,
     2: _TRANSCRIPT,
@@ -213,6 +218,7 @@ _MIGRATIONS: dict[int, str] = {
     5: _SCENES,
     6: _EVENTS,
     7: _USAGE,
+    8: _ANSWER_REVISIONS,
 }
 
 

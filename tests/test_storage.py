@@ -330,13 +330,20 @@ def test_an_answer_keeps_its_citations(store, tmp_path):
 def test_recording_a_second_answer_replaces_the_first(store, tmp_path):
     video = reference(store, tmp_path)
     job = store.create_job(video.id, "q", [NewTask(id="answer", agent="supervisor", action="a")])
-    store.record_answer(job.id, video.id, "q", "第一版", "m", [Citation(0, 1_000, "一")])
+    first = store.record_answer(
+        job.id, video.id, "q", "第一版", "m", [Citation(0, 1_000, "一")], stage="partial"
+    )
 
     replaced = store.record_answer(job.id, video.id, "q", "第二版", "m", [])
 
+    assert first.stage == "partial"
+    assert first.revision == 1
+    assert replaced.stage == "final"
+    assert replaced.revision == 2
     assert replaced.text == "第二版"
     assert replaced.citations == ()
     assert store.answer(job.id).text == "第二版"
+    assert store.answer(job.id).revision == 2
 
 
 def test_an_unknown_job_has_no_answer(store):

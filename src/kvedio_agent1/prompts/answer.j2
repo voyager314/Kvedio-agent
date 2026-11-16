@@ -30,6 +30,15 @@ Each line is one stretch of the recording, starting with the moment it begins. N
 
 The system appends a short note when a stage failed to produce one of these sources; do not repeat that gap in the answer itself. Do not speculate about what the missing source would have shown.
 {% endif %}
+{% if previous %}
+## Earlier conclusion
+
+This conclusion was written from only part of the evidence. Keep what the new evidence still supports, revise what it contradicts, and add what it shows. Do not mention that an earlier conclusion existed.
+
+<earlier>
+{{ previous }}
+</earlier>
+{% endif %}
 ## Guidelines
 
 1. Use only the evidence above. If it does not cover part of the question, say the available evidence does not cover it; do not fill the gap from general knowledge.

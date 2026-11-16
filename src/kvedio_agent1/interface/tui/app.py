@@ -157,6 +157,7 @@ class Workbench(App[None]):
         self._streamed: list[str] = []  # the answer currently being written
         self._queue: list[Reference | str] = []  # requests waiting for the worker
         self._busy = False
+        self._shown: dict[str, int] = {}  # job id -> answer revision already in the chat
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -323,6 +324,15 @@ class Workbench(App[None]):
         elif kind is EventKind.VIDEO_REGISTERED:
             self._render_timeline()
             self._render_evidence()
+        elif kind is EventKind.RESULT_PARTIAL:
+            self._present_result(
+                event.job_id,
+                partial=True,
+                expected=_revision(event),
+                pending=_pending(event),
+            )
+        elif kind is EventKind.RESULT_FINAL:
+            self._present_result(event.job_id, partial=False, expected=_revision(event))
         elif kind in _JOB_END_EVENTS:
             self._running_jobs.discard(event.job_id)
             self._announce(event.job_id)
@@ -389,16 +399,48 @@ class Workbench(App[None]):
         self._release()
 
     def _announce_answer(self, job_id: str) -> None:
-        """Print the conclusion in the chat panel, with the moments it points at."""
+        """Print the conclusion on screen when no result event reached the chat first."""
+        self._present_result(job_id, partial=None)
+
+    def _present_result(
+        self,
+        job_id: str,
+        *,
+        partial: bool | None,
+        expected: int | None = None,
+        pending: tuple[str, ...] = (),
+    ) -> None:
+        """Print one stored revision, once, marking a preview or a supplemented text.
+
+        ``expected`` is the revision the event announced: a preview that was
+        already replaced by the time the pump ran is skipped rather than shown
+        with the final text under a provisional label. ``pending`` names the
+        branches still working, which is different from a branch that failed.
+        """
         answer = self._store.answer(job_id)
         if answer is None:
             return
+        if expected is not None and answer.revision != expected:
+            return
+        if self._shown.get(job_id) == answer.revision:
+            return
+        self._shown[job_id] = answer.revision
+        self._latest = self._store.job(job_id) or self._latest
+        if partial is True:
+            detail = "、".join(pending) if pending else "部分证据"
+            self._say(f"初步结论（{detail}尚未到位）", style="yellow")
+        elif answer.stage == "partial":
+            self._say("初步结论（作业未完成）", style="yellow")
+        elif answer.revision > 1:
+            self._say("结论已补充", style="green")
+        self._close_stream()
         self._say(answer.text)
         if not answer.citations:
             self._say("没有可引用的片段。", style="dim")
-            return
-        moments = "、".join(_span(citation) for citation in answer.citations)
-        self._say(f"证据 {len(answer.citations)} 处：{moments}", style="dim")
+        else:
+            moments = "、".join(_span(citation) for citation in answer.citations)
+            self._say(f"证据 {len(answer.citations)} 处：{moments}", style="dim")
+        self._render_evidence()
 
     def _reload(self) -> None:
         """Render what the store already holds, so a restart does not look like an empty install."""
@@ -501,8 +543,9 @@ class Workbench(App[None]):
         panel.update("\n".join(lines))
 
     def _citation_text(self, answer: Answer) -> str:
-        """The moments behind the conclusion on screen, with the words spoken there."""
-        lines = [f"引用 {len(answer.citations)} 处"]
+        """The moments behind the conclusion on screen, with its revision."""
+        stage = "初步" if answer.stage == "partial" else "最终"
+        lines = [f"引用 {len(answer.citations)} 处 · 第 {answer.revision} 版（{stage}）"]
         for citation in answer.citations[:3]:
             lines.append(f"{_span(citation)}　{citation.quote[:34]}")
         if len(answer.citations) > 3:
@@ -623,6 +666,20 @@ class Workbench(App[None]):
         self.query_one("#chat", RichLog).write(
             Text(message, style=style or None, overflow="fold")
         )
+
+
+def _revision(event: Event) -> int | None:
+    """The answer revision a result event announced, when it carries one."""
+    value = event.payload.get("revision")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _pending(event: Event) -> tuple[str, ...]:
+    """The branches a partial result still expects, as the event named them."""
+    value = event.payload.get("pending")
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item) for item in value)
 
 
 def _span(citation: Citation) -> str:

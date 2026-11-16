@@ -7,6 +7,7 @@ import pytest
 from kvedio_agent1.core.domain import (
     Chunk,
     DependencyMode,
+    EventKind,
     MediaInfo,
     NewTask,
     Scene,
@@ -377,10 +378,103 @@ def test_a_failed_vision_run_is_named_in_the_conclusion(store):
     )
 
     assert "预算还差二十万" in answer.text
-    assert answer.text.endswith(
-        "证据范围：本次作答有证据缺失——画面描述不可用（视觉模型不可用）。"
-    )
+    assert answer.text.endswith("证据范围：证据缺失——画面描述不可用（视觉模型不可用）。")
     assert "Evidence not available" in chat.calls[1][0].content
+
+
+def test_a_preliminary_is_stored_and_the_final_integrates_it(store):
+    video, _ = prepare(store)
+    job = store.create_job(
+        video.id,
+        "预算够吗",
+        [
+            NewTask(id="answer_preliminary", agent="supervisor", action="answer_preliminary"),
+            NewTask(
+                id="answer",
+                agent="supervisor",
+                action="answer",
+                depends_on=("answer_preliminary",),
+                dependency_mode=DependencyMode.PARTIAL,
+            ),
+        ],
+    )
+    chat = ScriptedChat(
+        [
+            plan(("search", {"query": "预算"})),
+            "预算还差二十万 [00:05]。",
+            plan(("search", {"query": "预算"})),
+            "预算还差二十万，人力还要补两个人 [00:10]。",
+        ]
+    )
+    bus = EventBus()
+    channel = bus.subscribe()
+    answering = Answering(store, bus, chat, "chat-model")
+
+    first = answering.answer(job, lambda fraction, message: None, preliminary=True)
+    assert first.stage == "partial"
+    assert first.revision == 1
+
+    second = answering.answer(job, lambda fraction, message: None)
+    assert second.stage == "final"
+    assert second.revision == 2
+    assert "人力" in second.text
+    assert "Earlier conclusion" in chat.calls[3][0].content
+    assert "预算还差二十万 [00:05]。" in chat.calls[3][0].content
+
+    events = _drain(channel)
+    partial = next(event for event in events if event.kind is EventKind.RESULT_PARTIAL)
+    final = next(event for event in events if event.kind is EventKind.RESULT_FINAL)
+    assert partial.payload["stage"] == "partial"
+    assert partial.payload["revision"] == 1
+    assert final.payload["stage"] == "final"
+    assert final.payload["revision"] == 2
+
+
+def test_a_preliminary_names_the_branch_still_generating(store):
+    video = store.register_video(
+        Path("lecture.mp4"), size_bytes=5, mtime_ns=5, fingerprint="fp-pending"
+    )
+    store.record_media(
+        video.id,
+        MediaInfo(
+            duration_ms=5_000,
+            container="mp4",
+            video_codec="h264",
+            width=320,
+            height=180,
+            fps=25.0,
+            audio_codec="aac",
+            sample_rate=48_000,
+            channels=2,
+        ),
+    )
+    store.save_scene(video.id, "sk", 0, Scene(0, 4_000, "白板上写着预算", "/tmp/frame.jpg"))
+    job = store.create_job(
+        video.id,
+        "画面里有什么",
+        [
+            NewTask(id="transcribe", agent="asr", action="transcribe"),
+            NewTask(
+                id="answer_preliminary",
+                agent="supervisor",
+                action="answer_preliminary",
+                depends_on=("transcribe",),
+                dependency_mode=DependencyMode.ANY,
+            ),
+        ],
+    )
+    tasks = {task.id: task for task in store.tasks_for_job(job.id)}
+    store.save_task(replace(tasks["transcribe"], status=TaskStatus.RUNNING))
+    chat = ScriptedChat([plan(("scenes", {})), "白板上写着预算 [00:01]。"])
+
+    answer = Answering(store, EventBus(), chat, "chat-model").answer(
+        job, lambda fraction, message: None, preliminary=True
+    )
+
+    assert answer.stage == "partial"
+    assert answer.text.endswith(
+        "证据范围：初步结论，文字转录仍在生成，完成后会补充。"
+    )
 
 
 def _drain(channel) -> list:

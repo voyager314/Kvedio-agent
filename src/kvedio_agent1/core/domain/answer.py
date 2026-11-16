@@ -28,6 +28,12 @@ class Answer:
 
     An answer with no citations is only produced when nothing was retrieved; a
     conclusion drawn from evidence always names the moments it drew on.
+
+    A job answers more than once when its two evidence branches finish apart: the
+    first stored text is ``partial``, written from the branch that arrived first,
+    and the final text replaces it with ``stage`` ``final`` and a higher
+    ``revision``. Only the latest row is kept; earlier revisions survive in the
+    event stream the interface already rendered.
     """
 
     id: int
@@ -38,3 +44,5 @@ class Answer:
     model: str  # the chat model that wrote it
     citations: tuple[Citation, ...]
     created_at: datetime
+    stage: str = "final"  # permitted values: partial, final
+    revision: int = 1  # 1 for the first stored text, incremented on each replacement

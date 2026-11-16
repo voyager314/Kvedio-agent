@@ -37,15 +37,19 @@ def write(
     evidence: Sequence[Evidence],
     duration_ms: int,
     limits: Sequence[str] = (),
+    previous: str | None = None,
     on_delta: Callable[[str], None] | None = None,
 ) -> Conclusion:
     """Ask for an answer and check every citation before returning it.
 
     ``limits`` names the sources this recording could not supply, so the prompt
-    can keep the model from claiming more than the evidence covers. One repair
-    attempt is allowed, with the offending moments named back to the model; a
-    second failure raises. The alternative — storing the text as given — would
-    leave the interface showing a timestamp that opens nothing.
+    can keep the model from claiming more than the evidence covers. ``previous``
+    is the conclusion written before the second branch settled: the model is asked
+    to integrate it with the new evidence, keeping what still holds and revising
+    what the new evidence contradicts. One repair attempt is allowed, with the
+    offending moments named back to the model; a second failure raises. The
+    alternative — storing the text as given — would leave the interface showing a
+    timestamp that opens nothing.
     """
     if not evidence:
         raise ValueError("没有可用的证据")
@@ -55,6 +59,7 @@ def write(
         evidence=evidence,
         duration_ms=duration_ms,
         limits=limits,
+        previous=previous,
     )
     base = [Message(role="system", content=system)]
 

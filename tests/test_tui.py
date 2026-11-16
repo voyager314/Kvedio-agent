@@ -2,11 +2,18 @@ import asyncio
 import time
 from pathlib import Path
 
-from textual.widgets import DataTable, Input, Static
+from textual.widgets import DataTable, Input, RichLog, Static
 
 from kvedio_agent1.core.asr import AsrStage
 from kvedio_agent1.core.config import load_or_create
-from kvedio_agent1.core.domain import Citation, Event, EventKind, JobStatus, Segment
+from kvedio_agent1.core.domain import (
+    Citation,
+    Event,
+    EventKind,
+    JobStatus,
+    NewTask,
+    Segment,
+)
 from kvedio_agent1.core.llm import Reply
 from kvedio_agent1.core.memory import MemoryBuilder
 from kvedio_agent1.core.pipeline import Pipeline, Stages
@@ -19,6 +26,11 @@ from kvedio_agent1.interface.tui.app import _span
 
 def spoken(audio: Path) -> list[Segment]:
     return [Segment(start_ms=0, end_ms=600, text="开场白")]
+
+
+def _chat(app) -> str:
+    """The chat panel's text, one line per written line."""
+    return "\n".join(strip.text for strip in app.query_one("#chat", RichLog).lines)
 
 
 class _Chat:
@@ -212,6 +224,79 @@ def test_a_scene_citation_is_marked_in_the_evidence_panel():
     assert _span(Citation(start_ms=1_000, end_ms=2_000, quote="看", kind="scene")) == "画面 00:01"
     assert _span(Citation(start_ms=1_000, end_ms=2_000, quote="说")) == "00:01"
     assert _span(Citation(1_000, 9_000, "说")) == "00:01–00:09"
+
+def test_a_preliminary_and_its_supplement_are_each_shown_once(
+    home, tmp_path, make_answerer
+):
+    loaded = load_or_create()
+    store = Storage(tmp_path / "kvedio.db")
+    bus = EventBus()
+    pipeline = build(
+        store, Workspace(tmp_path / "workspace"), bus, loaded, make_answerer(store)
+    )
+    video = store.register_video(
+        Path("talk.mp4"), size_bytes=1, mtime_ns=1, fingerprint="fp-tui"
+    )
+    job = store.create_job(
+        video.id, "q", [NewTask(id="answer", agent="supervisor", action="answer")]
+    )
+    store.record_answer(
+        job.id,
+        video.id,
+        "q",
+        "初步文本",
+        "m",
+        [Citation(0, 1_000, "一")],
+        stage="partial",
+    )
+
+    async def scenario() -> None:
+        app = Workbench(loaded, store, pipeline, bus)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            bus.publish(
+                Event.stamp(
+                    EventKind.RESULT_PARTIAL,
+                    job_id=job.id,
+                    payload={"revision": 1, "pending": ["画面描述"]},
+                )
+            )
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if app._shown.get(job.id) == 1:
+                    break
+            lines = _chat(app)
+            assert "初步结论（画面描述尚未到位）" in lines
+            assert "初步文本" in lines
+
+            store.record_answer(
+                job.id,
+                video.id,
+                "q",
+                "最终文本",
+                "m",
+                [Citation(0, 1_000, "一")],
+            )
+            bus.publish(
+                Event.stamp(
+                    EventKind.RESULT_FINAL, job_id=job.id, payload={"revision": 2}
+                )
+            )
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if app._shown.get(job.id) == 2:
+                    break
+            lines = _chat(app)
+            assert "结论已补充" in lines
+            assert lines.count("最终文本") == 1
+
+            app._announce(job.id)
+            await pilot.pause()
+            assert _chat(app).count("最终文本") == 1
+
+    asyncio.run(scenario())
+    store.close()
+
 
 def test_the_answer_is_shown_while_it_is_written(home, tmp_path, make_answerer):
     loaded = load_or_create()

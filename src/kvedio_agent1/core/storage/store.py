@@ -404,26 +404,34 @@ class Storage:
         text: str,
         model: str,
         citations: Sequence[Citation],
+        *,
+        stage: str = "final",
     ) -> Answer:
         """Store one conclusion and the moments it cites, as one transaction.
 
-        A job answers once: recording a second answer replaces the first, so a
-        retried job cannot leave two conclusions for the same question.
+        A job keeps one answer row: recording a second conclusion replaces the
+        first and increments ``revision``, so a retried job cannot leave two
+        conclusions for the same question. ``stage`` says whether the text was
+        written from part of the evidence (``partial``) or from all of it
+        (``final``).
         """
+        if stage not in ("partial", "final"):
+            raise ValueError(f"未知的结论阶段：{stage}")
         moment = _instant(_now())
         with self._lock, self._connection:
             existing = self._connection.execute(
-                "SELECT id FROM answer WHERE job_id = ?", (job_id,)
+                "SELECT id, revision FROM answer WHERE job_id = ?", (job_id,)
             ).fetchone()
+            revision = int(existing["revision"]) + 1 if existing is not None else 1
             if existing is not None:
                 self._connection.execute(
                     "DELETE FROM answer_citation WHERE answer_id = ?", (existing["id"],)
                 )
                 self._connection.execute("DELETE FROM answer WHERE id = ?", (existing["id"],))
             cursor = self._connection.execute(
-                "INSERT INTO answer (job_id, video_id, question, text, model, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (job_id, video_id, question, text, model, moment),
+                "INSERT INTO answer (job_id, video_id, question, text, model, created_at,"
+                " stage, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_id, video_id, question, text, model, moment, stage, revision),
             )
             answer_id = int(cursor.lastrowid or 0)
             self._connection.executemany(
@@ -900,6 +908,8 @@ def _answer(row: sqlite3.Row, citations: Sequence[sqlite3.Row]) -> Answer:
             for item in citations
         ),
         created_at=_moment(row["created_at"]),
+        stage=row["stage"],
+        revision=int(row["revision"]),
     )
 
 

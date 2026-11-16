@@ -38,16 +38,21 @@ from ..media import extract_audio, identify, probe
 from ..memory import MemoryBuilder
 from ..storage import Storage, StorageError
 from ..supervisor import Answering
-from ..tasks import Cancellation, EventBus, Scheduler, TaskContext
+from ..tasks import Cancellation, Cancelled, EventBus, Scheduler, TaskContext
 from ..vision import EventBuilder, VisionBuilder
 from ..workspace import Workspace
 
 
 class Answerer(Protocol):
-    """What the pipeline needs from the supervisor: one stored answer per job."""
+    """What the pipeline needs from the supervisor: one stored answer per pass."""
 
     def answer(
-        self, job: JobRecord, report: Callable[[float, str | None], None]
+        self,
+        job: JobRecord,
+        report: Callable[[float, str | None], None],
+        *,
+        cancelled: Callable[[], bool] | None = None,
+        preliminary: bool = False,
     ) -> Answer: ...
 
 
@@ -123,6 +128,7 @@ class Pipeline:
             "memory": self._memory,
             "vision": self._vision,
             "events": self._events,
+            "answer_preliminary": self._answer_early,
             "answer": self._answer,
         }
         try:
@@ -151,6 +157,11 @@ class Pipeline:
         consumes the other's output, so they hang from the probe as separate
         branches. The answer joins the last node of each branch under
         ``PARTIAL``: a branch that failed costs its evidence, not the conclusion.
+
+        When both branches can still deliver a citable source, a preliminary
+        answer runs on the first one to arrive. The final answer waits for the
+        preliminary and both branches: it reads the earlier text as a prior, so
+        the two passes cannot race to overwrite each other.
         """
         tasks: list[NewTask] = []
         source: tuple[str, ...] = ()
@@ -159,16 +170,83 @@ class Pipeline:
             source = ("probe",)
         spoken = self._spoken_branch(video, source, tasks)
         seen = self._visual_branch(video, source, tasks)
+        early = self._early_graph(video, spoken, seen, tasks)
+        joined = _join(spoken, seen, early)
         tasks.append(
             NewTask(
                 id="answer",
                 agent="supervisor",
                 action="answer",
-                depends_on=_join(spoken, seen),
+                depends_on=joined,
                 dependency_mode=DependencyMode.PARTIAL,
             )
         )
         return tuple(tasks)
+
+    def _early_graph(
+        self,
+        video: VideoRecord,
+        spoken: tuple[str, ...],
+        seen: tuple[str, ...],
+        tasks: list[NewTask],
+    ) -> tuple[str, ...]:
+        """Add the preliminary answer when the two branches will arrive apart.
+
+        Returns its id, or an empty tuple when one source already covers the video
+        or only one branch can ever contribute. A source already in the store lets
+        the preliminary run at once; otherwise it waits for either branch to
+        succeed.
+        """
+        spoken_ready = self._spoken_ready(video)
+        visual_ready = self._visual_ready(video)
+        if spoken_ready and visual_ready:
+            return ()
+        if not (self._expects_speech(video) and self._expects_visual(video)):
+            return ()
+        if video.media is None and (spoken_ready or visual_ready):
+            return ()
+        early: tuple[str, ...] = ()
+        if not (spoken_ready or visual_ready):
+            early = _join(spoken, seen)
+        tasks.append(
+            NewTask(
+                id="answer_preliminary",
+                agent="supervisor",
+                action="answer_preliminary",
+                depends_on=early,
+                dependency_mode=DependencyMode.ANY,
+            )
+        )
+        return ("answer_preliminary",)
+
+    def _spoken_ready(self, video: VideoRecord) -> bool:
+        """Whether a finished transcript with words is already in the store."""
+        transcript = self._store.transcript(video.id)
+        return transcript is not None and transcript.ready and transcript.segment_count > 0
+
+    def _visual_ready(self, video: VideoRecord) -> bool:
+        """Whether at least one scene description is already in the store."""
+        return bool(self._store.scenes(video.id))
+
+    def _expects_speech(self, video: VideoRecord) -> bool:
+        """Whether a citable transcript is here or a transcribe node will run."""
+        if self._spoken_ready(video):
+            return True
+        if self._stages.asr is None:
+            return False
+        if video.media is not None and video.media.audio_codec is None:
+            return False
+        return self._needs_transcript(video)
+
+    def _expects_visual(self, video: VideoRecord) -> bool:
+        """Whether citable scenes are here or a vision node will run."""
+        if self._visual_ready(video):
+            return True
+        if self._stages.vision is None:
+            return False
+        if video.media is not None and video.media.video_codec is None:
+            return False
+        return self._needs_vision(video)
 
     def _spoken_branch(
         self, video: VideoRecord, source: tuple[str, ...], tasks: list[NewTask]
@@ -352,6 +430,34 @@ class Pipeline:
         self._log(context, f"事件完成：{stats.events} 个")
         context.report(1.0)
 
+    def _answer_early(self, context: TaskContext) -> None:
+        """Publish a conclusion from the first branch that produced usable evidence.
+
+        A preview is an optimization, not a deliverable: a failed call is logged
+        and the task still succeeds, so a preview that never reached the user does
+        not turn the final job into a partial one. Cancellation is not swallowed.
+        """
+        context.raise_if_cancelled()
+        answering = self._stages.answering
+        if answering is None:
+            self._log(context, "未配置对话模型，跳过初步结论")
+            context.report(1.0)
+            return
+        try:
+            answer = answering.answer(
+                context.job,
+                context.report,
+                cancelled=lambda: context.cancelled,
+                preliminary=True,
+            )
+        except Cancelled:
+            raise
+        except Exception as error:  # a preview must not decide the job's fate
+            self._log(context, f"初步结论未生成：{error}")
+            context.report(1.0)
+            return
+        context.report(1.0, f"初步结论引用 {len(answer.citations)} 处")
+
     def _answer(self, context: TaskContext) -> None:
         """Answer from whatever evidence the video produced, naming any gap in the conclusion."""
         context.raise_if_cancelled()
@@ -359,7 +465,12 @@ class Pipeline:
         if answering is None:
             raise ValueError("未配置对话模型：supervisor")
         context.report(0.0, "开始作答")
-        answer = answering.answer(context.job, context.report, cancelled=lambda: context.cancelled)
+        answer = answering.answer(
+            context.job,
+            context.report,
+            cancelled=lambda: context.cancelled,
+            preliminary=False,
+        )
         context.report(1.0, f"结论引用 {len(answer.citations)} 处")
 
     def _video(self, context: TaskContext) -> VideoRecord:

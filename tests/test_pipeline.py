@@ -250,7 +250,9 @@ def test_vision_and_transcription_hang_from_the_probe_as_separate_branches(
     assert tasks["transcribe"].depends_on == ("audio",)
     assert tasks["memory"].depends_on == ("transcribe",)
     assert tasks["vision"].depends_on == ("probe",)
-    assert tasks["answer"].depends_on == ("memory", "vision")
+    assert tasks["answer_preliminary"].depends_on == ("memory", "vision")
+    assert tasks["answer_preliminary"].dependency_mode is DependencyMode.ANY
+    assert tasks["answer"].depends_on == ("memory", "vision", "answer_preliminary")
     assert tasks["answer"].dependency_mode is DependencyMode.PARTIAL
     assert vision.builds == 1
 
@@ -279,7 +281,9 @@ def test_events_hang_from_vision_alone(store, workspace, answerer, sample_video)
     assert finished.status is JobStatus.SUCCEEDED, finished.error
     tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
     assert tasks["events"].depends_on == ("vision",)
-    assert tasks["answer"].depends_on == ("transcribe", "events")
+    assert tasks["answer_preliminary"].depends_on == ("transcribe", "events")
+    assert tasks["answer_preliminary"].dependency_mode is DependencyMode.ANY
+    assert tasks["answer"].depends_on == ("transcribe", "events", "answer_preliminary")
     assert events.builds == 1
 
 
@@ -368,6 +372,109 @@ def test_a_transcript_failure_still_answers_from_the_pictures(
     assert answer is not None
     assert answer.citations[0].kind == "scene"
     assert answer.citations[0].quote == "画面里有人在写代码"
+
+
+class _GatedVision:
+    """A describer that holds the branch open until the test releases it."""
+
+    def __init__(self, store) -> None:
+        self._store = store
+        self.release = threading.Event()
+
+    def current(self, video) -> bool:
+        return False
+
+    def build(self, video, report, *, cancelled=None) -> VisionStats:
+        if not self.release.wait(timeout=10):
+            raise RuntimeError("视觉分支没有被释放")
+        self._store.save_scene(
+            video.id,
+            "scene-key",
+            0,
+            Scene(0, 900, "画面里有人在写代码", "/tmp/0.jpg"),
+        )
+        report(1.0, "场景")
+        return VisionStats(scenes=1, described=1)
+
+
+def _wait_for_answer(store, job_id: str, timeout: float = 5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        answer = store.answer(job_id)
+        if answer is not None:
+            return answer
+        time.sleep(0.02)
+    return None
+
+
+def test_a_preliminary_answer_is_stored_before_the_slow_branch_finishes(
+    store, workspace, answerer, sample_video
+):
+    vision = _GatedVision(store)
+    pipeline, _ = build(store, workspace, answerer, vision=vision)
+    job = pipeline.submit(sample_video, "讲了什么")
+    worker = threading.Thread(target=pipeline.run, args=(job,))
+    worker.start()
+    try:
+        partial = _wait_for_answer(store, job.id)
+        assert partial is not None, "初步结论没有先落库"
+        assert partial.stage == "partial"
+        assert partial.revision == 1
+        assert store.job(job.id).status is JobStatus.RUNNING
+    finally:
+        vision.release.set()
+        worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    final = store.answer(job.id)
+    assert final is not None
+    assert final.stage == "final"
+    assert final.revision == 2
+
+
+class _FlakyPreview:
+    """A supervisor whose preview fails without affecting the final pass."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def answer(self, job, report, *, cancelled=None, preliminary=False):
+        if preliminary:
+            raise RuntimeError("预览失败")
+        return self._inner.answer(job, report, cancelled=cancelled)
+
+
+def test_a_failed_preview_does_not_taint_the_job(store, workspace, answerer, sample_video):
+    pipeline, _ = build(
+        store, workspace, _FlakyPreview(answerer), vision=_Vision()
+    )
+
+    finished = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
+
+    tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
+    assert finished.status is JobStatus.SUCCEEDED, finished.error
+    assert tasks["answer_preliminary"].status is TaskStatus.SUCCEEDED
+    assert tasks["answer"].status is TaskStatus.SUCCEEDED
+    assert store.answer(finished.id).stage == "final"
+
+
+def test_both_failed_branches_leave_no_conclusion(store, workspace, answerer, sample_video):
+    pipeline, _ = build(
+        store,
+        workspace,
+        answerer,
+        transcribe=_BrokenSpeech(),
+        vision=_BrokenVision(),
+    )
+
+    finished = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
+
+    tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
+    assert tasks["transcribe"].status is TaskStatus.FAILED
+    assert tasks["vision"].status is TaskStatus.FAILED
+    assert tasks["answer_preliminary"].status is TaskStatus.SKIPPED
+    assert tasks["answer"].status is TaskStatus.FAILED
+    assert store.answer(finished.id) is None
 
 
 def test_a_running_job_can_be_cancelled(store, workspace, answerer, sample_video):
