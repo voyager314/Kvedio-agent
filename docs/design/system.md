@@ -71,7 +71,7 @@
 | `core/asr/` | 转录流水线：切段、并发、合并、检查点 | M1 |
 | `core/supervisor/` | 计划生成、检索编排、结论合成、引用校验 | M2 |
 | `core/memory/` | 覆盖图构建与混合检索：关键词、向量、证据选取 | M3 |
-| `core/video/` | 视觉理解：抽帧策略、帧描述、事件抽取 | M4 |
+| `core/vision/` | 场景切分、抽帧与帧描述 | M4 起，逐步补齐 |
 | `interface/` | 终端界面：子命令、屏幕、面板、事件泵、输入语法 | M0 |
 | `tools/` | 暴露给监督者的工具实现，一族一模块：转录检索 | M2 |
 | `prompts/` | 提示词模板：Jinja2，纯英文，作答语言随提问 | M2 |
@@ -225,6 +225,31 @@ CREATE TABLE segment_vector (
 );
 ```
 
+一场戏一行，另有一行记录"这一次跑完了"。后者不是冗余：判断"要不要重跑"需要知道上一轮切出了多少场，而重新切一遍要逐秒读画面。
+
+```sql
+CREATE TABLE scene (
+  id          INTEGER PRIMARY KEY,
+  video_id    INTEGER NOT NULL REFERENCES video(id),
+  cache_key   TEXT    NOT NULL,         -- 指纹 + 视觉模型 + 切分参数
+  position    INTEGER NOT NULL,
+  start_ms    INTEGER NOT NULL,
+  end_ms      INTEGER NOT NULL,
+  frame_path  TEXT    NOT NULL,         -- 描述所依据的那一帧
+  description TEXT    NOT NULL,
+  model       TEXT    NOT NULL,
+  created_at  TEXT    NOT NULL,
+  UNIQUE (video_id, cache_key, position)
+);
+
+CREATE TABLE scene_run (
+  video_id     INTEGER PRIMARY KEY REFERENCES video(id),
+  cache_key    TEXT    NOT NULL,
+  total        INTEGER NOT NULL,
+  completed_at TEXT    NOT NULL
+);
+```
+
 `artifact` 仍未建立：它要等视觉阶段产生独立文件，届时再随迁移加入。计划与轨迹刻意不落库：它们是本次作答的中间过程，界面上按事件显示，重放一段过期计划没有意义。
 
 ### 4.2 引用规则
@@ -233,7 +258,7 @@ CREATE TABLE segment_vector (
 
 ### 4.3 迁移
 
-`PRAGMA user_version` 记录当前版本，现为 4。启动时若版本低于代码期望，按顺序执行各版本的迁移脚本；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。版本高于代码时拒绝打开：那些列没有反向迁移，继续写会静默丢数据。
+`PRAGMA user_version` 记录当前版本，现为 5。启动时若版本低于代码期望，按顺序执行各版本的迁移脚本；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。版本高于代码时拒绝打开：那些列没有反向迁移，继续写会静默丢数据。
 
 ## 5. 任务模型
 
@@ -354,7 +379,7 @@ runtime:
 2. **检索窗口**：`search` 同时跑关键词与向量两条排名，用倒序秩融合（RRF）合并——两种分数不同尺度，按值相加会让一方淹没另一方。向量来自 `segment_vector`，没有嵌入模型时退回关键词；中文整句无命中时退回 2 字窗口。
 3. **下钻**：模型可以按秒指定区间再取一段，单次最多 40 段；这一步同样消耗总预算。
 
-工具返回值是片段进入上下文的唯一入口。当前三个工具：`overview`、`search`、`read_range`。说话人分离与区间摘要要等说话人识别和场景切分，不在 M3。
+工具返回值是片段进入上下文的唯一入口。当前四个工具：`overview`、`search`、`scenes`、`read_range`。说话人分离与区间摘要要等说话人识别和场景切分，不在 M3。
 
 覆盖图的摘要只作导航：它出现在 `overview` 结果里时标为 `(map)`，引用校验只认 `verbatim` 的片段，所以结论不会落在"摘要说"这种无人说过的话上。
 
@@ -372,7 +397,7 @@ runtime:
 | --- | --- | --- |
 | 对话 | 用户输入、系统回复、计划与检索轨迹 | 显示用法提示与配置状态 |
 | 任务 | 任务 ID、角色、动作、状态、进度、耗时 | 显示"尚未引用视频" |
-| 时间轴 | 时长、容器、转录段数与覆盖区间、记忆规模 | 显示"尚未引用视频" |
+| 时间轴 | 时长、容器、转录段数与覆盖区间、记忆规模（覆盖图/向量/场景） | 显示"尚未引用视频" |
 | 证据 | 当前结论引用的时间点与转录原文 | 显示"暂无证据" |
 
 状态栏常驻：数据库文件名、三个角色使用的模型与可用状态、运行中任务数。
@@ -426,6 +451,15 @@ runtime:
 验收：46 段的录像建图 8 块、向量 46 条，二次构建零调用（`test_a_second_build_costs_nothing`）；第二批向量中断后重跑只补一批（`test_an_interrupted_build_resumes_at_the_first_missing_batch`）；换嵌入模型后向量仍是 46 条而不是 92 条（`test_a_new_embedding_model_replaces_the_old_vectors`）；"资金"这种说法在转写里不存在时，只有向量能把它召回到预算段落（`test_hybrid_memory_finds_what_keywords_alone_miss`）。
 
 跨视频检索尚未实现：结论的引用目前属于"一条结论一个视频"，跨视频要先给 `answer_citation` 加视频归属、扩展引用格式，再谈多视频取证。这是下一个增量，不塞进本阶段。
+
+**M4 视觉（进行中）**
+- 场景边界：每秒取一帧，算 32×32 灰阶签名，相邻签名差异超过阈值即切；过短的场景（默认 2 秒）与相邻场景合并；一场戏最多 80 个，超了就按顺序折叠邻居。只做 seek 不整段解码，一小时录像约几百次 seek。
+- 抽帧：取场景中点，缩到 512 宽存 JPEG，放在 `workspace/video_N/scenes/`；描述所依据的那一帧始终留在磁盘上，供人回看。
+- 帧描述：视觉模型（`video` 角色）看图写一到两句，提示词里附上该场景的同期声，要求引用屏幕上的文字、不猜测画外内容。按场景逐条写入，中断后从缺的那场继续。
+- 证据：场景描述作为 `label="scene"` 的证据进入上下文；它与地图行一样带标记，但含义不同——地图行是"摘要"，场景行是"观察"。目前引用只锚定转录原文，**场景引用**（让结论直接指向画面）需要给 `answer_citation` 加 `kind`，与事件抽取一起做。
+- 未配置 `video` 角色的密钥时整个阶段不存在，作业照常完成，只是没有画面证据。
+
+待做：事件抽取（把若干场景归并成事件并命名）、跨模态对齐（事件行同时给出画面与同期声）、场景引用。
 
 **M4 视觉**：场景边界、抽帧策略、帧描述、事件抽取、跨模态对齐。
 验收：画面类问题给出时间戳与关键帧。
