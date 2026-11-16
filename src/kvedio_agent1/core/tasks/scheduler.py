@@ -62,10 +62,6 @@ class TaskContext:
     def task(self) -> TaskRecord:
         return self._task
 
-    @property
-    def store(self) -> Storage:
-        return self._store
-
     def report(self, progress: float, message: str | None = None) -> None:
         """Persist progress and, when given, publish one line for the interface."""
         value = min(1.0, max(self._task.progress, float(progress)))
