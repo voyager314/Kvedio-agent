@@ -18,6 +18,7 @@ from ..domain import Coverage, Segment, VideoRecord
 from ..llm import Chat, Embedder, Message
 from ..prompts import render
 from ..storage import Storage
+from ..tasks import stop_if
 
 MIN_SEGMENTS_FOR_COVERAGE = 40  # below this the raw samples already cover the whole recording
 DEFAULT_BLOCK_MS = 180_000  # three minutes of talk per map line
@@ -89,8 +90,11 @@ class MemoryBuilder:
                 return False
         return True
 
-    def build(self, video: VideoRecord, report: Report) -> MemoryStats:
+    def build(
+        self, video: VideoRecord, report: Report, *, cancelled: Callable[[], bool] | None = None
+    ) -> MemoryStats:
         """Build whichever halves are configured, reporting progress across both."""
+        stop_if(cancelled)
         transcript = self._store.transcript(video.id)
         if transcript is None or not transcript.ready:
             raise ValueError("没有可用的转录，无法建立记忆")
@@ -103,7 +107,7 @@ class MemoryBuilder:
         blocks = 0
         if make_map:
             blocks = self._build_coverage(
-                video, transcript.cache_key, segments, _scaled(report, share)
+                video, transcript.cache_key, segments, _scaled(report, share), cancelled
             )
         else:
             blocks = len(self._store.coverage(video.id))
@@ -115,13 +119,19 @@ class MemoryBuilder:
                 transcript.cache_key,
                 indexed,
                 _shifted(report, share if make_map else 0.0),
+                cancelled,
             )
         else:
             vectors = len(self._store.vectorised(video.id))
         return MemoryStats(blocks=blocks, vectors=vectors)
 
     def _build_coverage(
-        self, video: VideoRecord, transcript_key: str, segments: Sequence[Segment], report: Report
+        self,
+        video: VideoRecord,
+        transcript_key: str,
+        segments: Sequence[Segment],
+        report: Report,
+        cancelled: Callable[[], bool] | None,
     ) -> int:
         key = self.coverage_key(transcript_key)
         self._store.prune_coverage(video.id, key)
@@ -130,6 +140,7 @@ class MemoryBuilder:
         for position, block in enumerate(blocks):
             if position in done:
                 continue
+            stop_if(cancelled)
             gist = self._gist(block)
             self._store.save_coverage(
                 video.id, key, position, Coverage(block.start_ms, block.end_ms, gist)
@@ -153,6 +164,7 @@ class MemoryBuilder:
         transcript_key: str,
         indexed: Sequence[tuple[int, Segment]],
         report: Report,
+        cancelled: Callable[[], bool] | None,
     ) -> int:
         key = self.vector_key(transcript_key)
         self._store.prune_vectors(video.id, key)
@@ -161,6 +173,7 @@ class MemoryBuilder:
             (segment_id, segment) for segment_id, segment in indexed if segment_id not in done
         ]
         for offset in range(0, len(pending), self._batch):
+            stop_if(cancelled)
             batch = pending[offset : offset + self._batch]
             vectors = self._embedder.embed([segment.text for _, segment in batch])
             self._store.save_vectors(

@@ -18,6 +18,7 @@ from ..domain import Scene, TimelineEvent, VideoRecord
 from ..llm import Chat, Message
 from ..prompts import render
 from ..storage import Storage
+from ..tasks import stop_if
 
 MAX_EVENTS = 40
 FALLBACK_GROUP = 5  # scenes per event when the model's answer is unusable
@@ -53,8 +54,11 @@ class EventBuilder:
         last = self._store.event_run(video.id)
         return last is not None and last[0] == self.key(video, run[0])
 
-    def build(self, video: VideoRecord, report: Report) -> EventStats:
+    def build(
+        self, video: VideoRecord, report: Report, *, cancelled: Callable[[], bool] | None = None
+    ) -> EventStats:
         """Read the shots, ask for events, and store the whole list in one go."""
+        stop_if(cancelled)
         if self.current(video):
             return EventStats(events=len(self._store.events(video.id)))
         run = self._store.scene_run(video.id)

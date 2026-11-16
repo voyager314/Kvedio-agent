@@ -23,7 +23,7 @@ class StubAnswerer:
         self._text = text
         self._quote = quote
 
-    def answer(self, job, report):
+    def answer(self, job, report, *, cancelled=None):
         transcript = self._store.transcript(job.video_id)
         if transcript is None or not transcript.ready:
             raise ValueError("没有可用的转录，无法作答")

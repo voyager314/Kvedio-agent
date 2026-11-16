@@ -28,6 +28,7 @@ from ..domain import (
 )
 from ..storage import Storage
 from .bus import EventBus
+from .cancellation import Cancellation, Cancelled
 from .state import check_transition
 
 Handler = Callable[["TaskContext"], None]
@@ -48,11 +49,19 @@ class TaskContext:
     panel cannot show a task regressing while it is still working.
     """
 
-    def __init__(self, job: JobRecord, task: TaskRecord, store: Storage, bus: EventBus) -> None:
+    def __init__(
+        self,
+        job: JobRecord,
+        task: TaskRecord,
+        store: Storage,
+        bus: EventBus,
+        cancellation: Cancellation | None = None,
+    ) -> None:
         self._job = job
         self._task = task
         self._store = store
         self._bus = bus
+        self._cancellation = cancellation or Cancellation()
 
     @property
     def job(self) -> JobRecord:
@@ -61,6 +70,15 @@ class TaskContext:
     @property
     def task(self) -> TaskRecord:
         return self._task
+
+    @property
+    def cancelled(self) -> bool:
+        """Whether the interface asked the run to stop; stages check it between units."""
+        return self._cancellation.cancelled
+
+    def raise_if_cancelled(self) -> None:
+        """Abort the calling stage when cancellation has been requested."""
+        self._cancellation.raise_if_cancelled()
 
     def report(self, progress: float, message: str | None = None) -> None:
         """Persist progress and, when given, publish one line for the interface."""
@@ -88,7 +106,12 @@ class Scheduler:
         self._bus = bus
         self._max_workers = max(1, max_workers)
 
-    def run(self, job: JobRecord, handlers: Mapping[str, Handler]) -> JobRecord:
+    def run(
+        self,
+        job: JobRecord,
+        handlers: Mapping[str, Handler],
+        cancellation: Cancellation | None = None,
+    ) -> JobRecord:
         """Execute every node of ``job`` and return it in its final state.
 
         ``handlers`` maps node id to its executable half and must cover the whole
@@ -102,6 +125,7 @@ class Scheduler:
         if unhandled:
             raise ValueError(f"缺少任务处理器：{', '.join(unhandled)}")
 
+        signal = cancellation or Cancellation()
         running = replace(job, status=JobStatus.RUNNING, started_at=job.started_at or _now())
         self._store.save_job(running)
         self._publish_job(EventKind.JOB_STARTED, running)
@@ -109,22 +133,27 @@ class Scheduler:
         with ThreadPoolExecutor(max_workers=self._max_workers, thread_name_prefix="kvedio") as pool:
             futures: dict[Future[None], str] = {}
             while True:
-                self._advance(tasks)
-                for identifier, task in tuple(tasks.items()):
-                    if task.status is not TaskStatus.READY:
-                        continue
-                    started = replace(
-                        task,
-                        status=TaskStatus.RUNNING,
-                        attempt=task.attempt + 1,
-                        progress=0.0,
-                        started_at=_now(),
-                        error=None,
-                    )
-                    self._transition(task, started, EventKind.TASK_STARTED)
-                    tasks[identifier] = started
-                    handler = handlers[identifier]
-                    futures[pool.submit(self._execute, running, started, handler)] = identifier
+                if signal.cancelled:
+                    self._cancel_queued(tasks)
+                else:
+                    self._advance(tasks)
+                    for identifier, task in tuple(tasks.items()):
+                        if task.status is not TaskStatus.READY:
+                            continue
+                        started = replace(
+                            task,
+                            status=TaskStatus.RUNNING,
+                            attempt=task.attempt + 1,
+                            progress=0.0,
+                            started_at=_now(),
+                            error=None,
+                        )
+                        self._transition(task, started, EventKind.TASK_STARTED)
+                        tasks[identifier] = started
+                        handler = handlers[identifier]
+                        futures[pool.submit(self._execute, running, started, handler, signal)] = (
+                            identifier
+                        )
 
                 if not futures:
                     break
@@ -133,7 +162,7 @@ class Scheduler:
                     identifier = futures.pop(future)
                     tasks[identifier] = self._settle(tasks[identifier], future)
 
-        return self._finish(running, tasks)
+        return self._finish(running, tasks, signal)
 
     def _advance(self, tasks: dict[str, TaskRecord]) -> None:
         """Resolve every node whose dependencies settled, repeating until nothing changes."""
@@ -159,9 +188,26 @@ class Scheduler:
                     continue
                 moved = True
 
+    def _cancel_queued(self, tasks: dict[str, TaskRecord]) -> None:
+        """Cancel every node that has not started; the running one stops itself."""
+        for identifier, task in tuple(tasks.items()):
+            if task.status not in (TaskStatus.PENDING, TaskStatus.READY, TaskStatus.FAILED):
+                continue
+            canceled = replace(
+                task, status=TaskStatus.CANCELED, finished_at=_now(), error="已取消"
+            )
+            self._transition(task, canceled, EventKind.TASK_CANCELED)
+            tasks[identifier] = canceled
+
     def _settle(self, task: TaskRecord, future: Future[None]) -> TaskRecord:
         """Record the outcome of one run, retrying while the attempt ceiling allows it."""
         failure = future.exception()
+        if isinstance(failure, Cancelled):
+            canceled = replace(
+                task, status=TaskStatus.CANCELED, finished_at=_now(), error="已取消"
+            )
+            self._transition(task, canceled, EventKind.TASK_CANCELED)
+            return canceled
         if failure is None:
             succeeded = replace(
                 task,
@@ -186,10 +232,14 @@ class Scheduler:
         self._transition(failed, ready, EventKind.TASK_READY)
         return ready
 
-    def _finish(self, job: JobRecord, tasks: Mapping[str, TaskRecord]) -> JobRecord:
+    def _finish(
+        self, job: JobRecord, tasks: Mapping[str, TaskRecord], cancellation: Cancellation
+    ) -> JobRecord:
         succeeded = sum(1 for task in tasks.values() if task.status is TaskStatus.SUCCEEDED)
         if succeeded == len(tasks):
             status = JobStatus.SUCCEEDED
+        elif cancellation.cancelled:
+            status = JobStatus.CANCELED
         elif succeeded == 0:
             status = JobStatus.FAILED
         else:
@@ -202,8 +252,10 @@ class Scheduler:
         )
         return finished
 
-    def _execute(self, job: JobRecord, task: TaskRecord, handler: Handler) -> None:
-        handler(TaskContext(job, task, self._store, self._bus))
+    def _execute(
+        self, job: JobRecord, task: TaskRecord, handler: Handler, signal: Cancellation
+    ) -> None:
+        handler(TaskContext(job, task, self._store, self._bus, signal))
 
     def _transition(
         self,

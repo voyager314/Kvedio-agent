@@ -9,7 +9,7 @@ from ..domain import Answer, Event, EventKind, JobRecord
 from ..llm import Chat, Embedder
 from ..memory import VideoMemory
 from ..storage import Storage, StorageError
-from ..tasks import EventBus
+from ..tasks import EventBus, stop_if
 from .planner import Plan, make_plan
 from .synthesis import Conclusion, write, write_absence
 
@@ -39,8 +39,11 @@ class Answering:
         self._model = model
         self._embedder = embedder
 
-    def answer(self, job: JobRecord, report: Report) -> Answer:
+    def answer(
+        self, job: JobRecord, report: Report, *, cancelled: Callable[[], bool] | None = None
+    ) -> Answer:
         """Plan, retrieve, write, check, store — or raise, leaving no answer behind."""
+        stop_if(cancelled)
         video = self._store.video(job.video_id)
         if video is None:
             raise StorageError(f"视频不存在：{job.video_id}")
@@ -53,7 +56,7 @@ class Answering:
         plan = make_plan(self._chat, job.question, toolbox.tools)
         self._log(job, plan.note)
 
-        evidence = self._gather(job, toolbox, plan, report)
+        evidence = self._gather(job, toolbox, plan, report, cancelled)
         if not evidence:
             report(0.6, "没有检索到可用片段")
             self._log(job, "没有检索到可用片段")
@@ -76,12 +79,18 @@ class Answering:
         return answer
 
     def _gather(
-        self, job: JobRecord, toolbox: ToolBox, plan: Plan, report: Report
+        self,
+        job: JobRecord,
+        toolbox: ToolBox,
+        plan: Plan,
+        report: Report,
+        cancelled: Callable[[], bool] | None = None,
     ) -> tuple[Evidence, ...]:
         """Run the plan, keep the evidence in timeline order, and announce each step."""
         collected: dict[tuple[int, int, str], Evidence] = {}
         total = max(1, len(plan.steps))
         for index, step in enumerate(plan.steps, start=1):
+            stop_if(cancelled)
             result = toolbox.call(step.tool, step.arguments)
             self._log(job, f"{step.why} · {result.note}" if step.why else result.note)
             for item in result.evidence:

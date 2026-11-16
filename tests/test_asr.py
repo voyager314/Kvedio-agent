@@ -6,6 +6,7 @@ import pytest
 from kvedio_agent1.core.asr import AsrStage
 from kvedio_agent1.core.domain import Segment
 from kvedio_agent1.core.storage import Storage
+from kvedio_agent1.core.tasks import Cancelled
 from kvedio_agent1.core.workspace import Workspace
 
 PATTERN = [(1_000, 8_000), (200, 0)] * 3  # three seconds of speech, three gaps
@@ -125,3 +126,15 @@ def test_a_video_without_prepared_audio_is_reported(store, workspace):
     )
     with pytest.raises(FileNotFoundError, match="音轨"):
         stage(store, workspace, FakeTranscriber()).run(video, lambda f, m: None)
+
+def test_a_cancelled_run_writes_nothing(store, workspace, make_wav):
+    video = prepare(store, workspace, make_wav(PATTERN))
+    transcriber = FakeTranscriber()
+
+    with pytest.raises(Cancelled):
+        stage(store, workspace, transcriber).run(
+            video, lambda fraction, message: None, cancelled=lambda: True
+        )
+
+    assert transcriber.calls == []
+    assert store.transcript(video.id) is None

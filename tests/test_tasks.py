@@ -12,7 +12,13 @@ from kvedio_agent1.core.domain import (
     TaskStatus,
 )
 from kvedio_agent1.core.storage import Storage
-from kvedio_agent1.core.tasks import EventBus, IllegalTransition, Scheduler, check_transition
+from kvedio_agent1.core.tasks import (
+    Cancellation,
+    EventBus,
+    IllegalTransition,
+    Scheduler,
+    check_transition,
+)
 
 
 @pytest.fixture
@@ -249,3 +255,45 @@ def test_a_missing_handler_is_refused_before_anything_runs(store, bus):
     with pytest.raises(ValueError, match="缺少任务处理器"):
         Scheduler(store, bus).run(job, {})
     assert store.job(job.id).status is JobStatus.QUEUED
+
+def test_cancellation_stops_the_graph_without_retrying(store, bus):
+    job = prepare(
+        store,
+        [
+            NewTask(id="a", agent="x", action="a", max_attempts=3),
+            NewTask(id="b", agent="x", action="b", depends_on=("a",)),
+        ],
+    )
+    signal = Cancellation()
+    calls: list[str] = []
+
+    def first(context) -> None:
+        calls.append("a")
+        signal.cancel()
+        context.raise_if_cancelled()
+
+    def second(context) -> None:
+        calls.append("b")
+
+    finished = Scheduler(store, bus).run(job, {"a": first, "b": second}, signal)
+
+    tasks = {task.id: task for task in store.tasks_for_job(job.id)}
+    assert finished.status is JobStatus.CANCELED
+    assert tasks["a"].status is TaskStatus.CANCELED
+    assert tasks["a"].attempt == 1  # not retried
+    assert tasks["b"].status is TaskStatus.CANCELED
+    assert calls == ["a"]
+
+
+def test_a_cancel_before_start_runs_nothing(store, bus):
+    job = prepare(store, [NewTask(id="a", agent="x", action="a")])
+
+    def handler(context) -> None:
+        raise AssertionError("不应运行")
+
+    signal = Cancellation()
+    signal.cancel()
+    finished = Scheduler(store, bus).run(job, {"a": handler}, signal)
+
+    assert finished.status is JobStatus.CANCELED
+    assert store.tasks_for_job(job.id)[0].status is TaskStatus.CANCELED

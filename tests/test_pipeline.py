@@ -1,4 +1,6 @@
 import queue
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -218,7 +220,7 @@ class _Vision:
     def current(self, video) -> bool:
         return False
 
-    def build(self, video, report) -> VisionStats:
+    def build(self, video, report, *, cancelled=None) -> VisionStats:
         self.builds += 1
         report(1.0, "场景")
         return VisionStats(scenes=1, described=1)
@@ -249,7 +251,7 @@ class _Events:
     def current(self, video) -> bool:
         return self.builds > 0
 
-    def build(self, video, report) -> EventStats:
+    def build(self, video, report, *, cancelled=None) -> EventStats:
         self.builds += 1
         report(1.0, "事件")
         return EventStats(events=2)
@@ -271,3 +273,34 @@ def test_events_follow_a_fresh_vision_run(store, workspace, answerer, sample_vid
         "answer",
     ]
     assert events.builds == 1
+
+def test_a_running_job_can_be_cancelled(store, workspace, answerer, sample_video):
+    gate = threading.Event()
+
+    def slow(audio: Path) -> list[Segment]:
+        gate.wait(timeout=5)
+        return spoken(audio)
+
+    pipeline, _ = build(store, workspace, answerer, transcribe=slow)
+    job = pipeline.submit(sample_video, "讲了什么")
+    worker = threading.Thread(target=pipeline.run, args=(job,))
+    worker.start()
+    for _ in range(100):
+        if store.job(job.id).status is JobStatus.RUNNING:
+            break
+        time.sleep(0.02)
+
+    assert pipeline.cancel(job.id) is True
+    gate.set()
+    worker.join(timeout=10)
+
+    finished = store.job(job.id)
+    assert finished.status is JobStatus.CANCELED
+    tasks = {task.id: task for task in store.tasks_for_job(job.id)}
+    assert tasks["answer"].status is TaskStatus.CANCELED
+    assert store.answer(job.id) is None
+
+
+def test_cancelling_an_unknown_job_is_refused(store, workspace, answerer):
+    pipeline, _ = build(store, workspace, answerer)
+    assert pipeline.cancel("job_missing") is False

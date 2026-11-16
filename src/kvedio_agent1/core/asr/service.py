@@ -16,6 +16,7 @@ from tempfile import NamedTemporaryFile
 
 from ..domain import Chunk, Segment, VideoRecord
 from ..storage import Storage
+from ..tasks import stop_if
 from ..workspace import Workspace
 from .chunking import plan_chunks, slice_audio
 
@@ -64,13 +65,17 @@ class AsrStage:
             and transcript.cache_key == self._cache_key(video)
         )
 
-    def run(self, video: VideoRecord, report: Report) -> int:
+    def run(
+        self, video: VideoRecord, report: Report, *, cancelled: Callable[[], bool] | None = None
+    ) -> int:
         """Transcribe every unfinished chunk and return the number of segments.
 
         ``report`` receives a fraction of the whole plan and a line naming what is
         happening, so a resumed run starts where the previous one stopped rather
-        than at zero.
+        than at zero. ``cancelled`` is polled between waves; chunks already stored
+        stay stored, so a cancelled run resumes where it stopped.
         """
+        stop_if(cancelled)
         audio = self._workspace.audio(video.id)
         if not audio.exists():
             raise FileNotFoundError(f"缺少音轨文件：{audio}")
@@ -87,22 +92,25 @@ class AsrStage:
         if pending:
             workers = min(self._concurrency, len(pending))
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kvedio-asr") as pool:
-                futures = {
-                    pool.submit(self._transcribe_chunk, audio, chunk, video.id): chunk
-                    for chunk in pending
-                }
-                for future in as_completed(futures):
-                    chunk = futures[future]
-                    self._store.save_chunk(
-                        transcript.id,
-                        video.id,
-                        TRANSCRIBE_STAGE,
-                        cache_key,
-                        chunk,
-                        future.result(),
-                    )
-                    finished += 1
-                    report(finished / len(chunks), f"转录 {finished}/{len(chunks)} 段")
+                for start in range(0, len(pending), workers):
+                    stop_if(cancelled)
+                    wave = pending[start : start + workers]
+                    futures = {
+                        pool.submit(self._transcribe_chunk, audio, chunk, video.id): chunk
+                        for chunk in wave
+                    }
+                    for future in as_completed(futures):
+                        chunk = futures[future]
+                        self._store.save_chunk(
+                            transcript.id,
+                            video.id,
+                            TRANSCRIBE_STAGE,
+                            cache_key,
+                            chunk,
+                            future.result(),
+                        )
+                        finished += 1
+                        report(finished / len(chunks), f"转录 {finished}/{len(chunks)} 段")
         self._store.finish_transcript(transcript.id)
         stored = self._store.transcript(video.id)
         return stored.segment_count if stored is not None else 0

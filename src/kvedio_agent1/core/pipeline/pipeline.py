@@ -16,6 +16,7 @@ wording.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +29,7 @@ from ..media import extract_audio, identify, probe
 from ..memory import MemoryBuilder
 from ..storage import Storage, StorageError
 from ..supervisor import Answering
-from ..tasks import EventBus, Scheduler, TaskContext
+from ..tasks import Cancellation, EventBus, Scheduler, TaskContext
 from ..vision import EventBuilder, VisionBuilder
 from ..workspace import Workspace
 
@@ -68,6 +69,8 @@ class Pipeline:
         self._scheduler = Scheduler(
             store, bus, max_workers=stages.runtime.max_global_workers
         )
+        self._cancellations: dict[str, Cancellation] = {}
+        self._tokens = threading.Lock()
 
     def submit(self, path: Path, question: str) -> JobRecord:
         """Register the file, then ask the question about it.
@@ -101,6 +104,9 @@ class Pipeline:
 
     def run(self, job: JobRecord) -> JobRecord:
         """Execute the job's graph on the calling thread and return its final state."""
+        signal = Cancellation()
+        with self._tokens:
+            self._cancellations[job.id] = signal
         handlers = {
             "probe": self._probe,
             "audio": self._audio,
@@ -110,7 +116,24 @@ class Pipeline:
             "events": self._events,
             "answer": self._answer,
         }
-        return self._scheduler.run(job, handlers)
+        try:
+            return self._scheduler.run(job, handlers, signal)
+        finally:
+            with self._tokens:
+                self._cancellations.pop(job.id, None)
+
+    def cancel(self, job_id: str) -> bool:
+        """Ask a running job to stop at its next safe point.
+
+        Returns whether the job was running: a finished or unknown job has nothing
+        to cancel, and saying so is better than pretending it worked.
+        """
+        with self._tokens:
+            signal = self._cancellations.get(job_id)
+        if signal is None:
+            return False
+        signal.cancel()
+        return True
 
     def _graph_for(self, video: VideoRecord) -> tuple[NewTask, ...]:
         """The nodes whose output is missing, chained in the order they run."""
@@ -186,6 +209,7 @@ class Pipeline:
         The length ceiling is checked before the record is written: a source the
         product will not analyse should not appear on the timeline as usable.
         """
+        context.raise_if_cancelled()
         video = self._video(context)
         context.report(0.05, "打开容器")
         media = probe(video.path)
@@ -210,6 +234,7 @@ class Pipeline:
         A source without an audio track is a finished stage, not a failure: there
         is nothing to transcribe, and the answer stage will say so.
         """
+        context.raise_if_cancelled()
         video = self._video(context)
         if video.media is not None and video.media.audio_codec is None:
             self._log(context, "没有音轨，跳过转录")
@@ -228,6 +253,7 @@ class Pipeline:
 
     def _transcribe(self, context: TaskContext) -> None:
         """Produce the transcript, reusing every chunk a previous run finished."""
+        context.raise_if_cancelled()
         video = self._video(context)
         if video.media is not None and video.media.audio_codec is None:
             context.report(1.0)
@@ -236,12 +262,13 @@ class Pipeline:
         if asr is None:
             raise ValueError("未配置语音模型：asr")
         context.report(0.0, "开始转录")
-        count = asr.run(video, context.report)
+        count = asr.run(video, context.report, cancelled=lambda: context.cancelled)
         self._log(context, f"转录完成：{count} 段")
         context.report(1.0)
 
     def _memory(self, context: TaskContext) -> None:
         """Build the coverage map and the vector index, skipping what is already there."""
+        context.raise_if_cancelled()
         builder = self._stages.memory
         if builder is None:
             context.report(1.0)
@@ -253,12 +280,13 @@ class Pipeline:
             context.report(1.0)
             return
         context.report(0.0, "建立记忆")
-        stats = builder.build(video, context.report)
+        stats = builder.build(video, context.report, cancelled=lambda: context.cancelled)
         self._log(context, f"记忆完成：覆盖图 {stats.blocks} 块 · 向量 {stats.vectors} 条")
         context.report(1.0)
 
     def _vision(self, context: TaskContext) -> None:
         """Cut the recording into scenes and describe each one, skipping described ones."""
+        context.raise_if_cancelled()
         builder = self._stages.vision
         if builder is None:
             context.report(1.0)
@@ -269,24 +297,26 @@ class Pipeline:
             context.report(1.0)
             return
         context.report(0.0, "识别场景")
-        stats = builder.build(video, context.report)
+        stats = builder.build(video, context.report, cancelled=lambda: context.cancelled)
         self._log(context, f"场景完成：{stats.described}/{stats.scenes} 个已描述")
         context.report(1.0)
 
     def _events(self, context: TaskContext) -> None:
         """Name the events the shots belong to, so a reader can find a stretch."""
+        context.raise_if_cancelled()
         builder = self._stages.events
         if builder is None:
             context.report(1.0)
             return
         video = self._video(context)
         context.report(0.0, "抽取事件")
-        stats = builder.build(video, context.report)
+        stats = builder.build(video, context.report, cancelled=lambda: context.cancelled)
         self._log(context, f"事件完成：{stats.events} 个")
         context.report(1.0)
 
     def _answer(self, context: TaskContext) -> None:
         """Answer from the transcript, citing only the moments retrieval returned."""
+        context.raise_if_cancelled()
         video = self._video(context)
         if video.media is not None and video.media.audio_codec is None:
             raise ValueError("该视频没有音轨，无法作答")
@@ -294,7 +324,7 @@ class Pipeline:
         if answering is None:
             raise ValueError("未配置对话模型：supervisor")
         context.report(0.0, "开始作答")
-        answer = answering.answer(context.job, context.report)
+        answer = answering.answer(context.job, context.report, cancelled=lambda: context.cancelled)
         context.report(1.0, f"结论引用 {len(answer.citations)} 处")
 
     def _video(self, context: TaskContext) -> VideoRecord:

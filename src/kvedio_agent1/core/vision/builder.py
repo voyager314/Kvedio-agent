@@ -18,6 +18,7 @@ from ..llm import Vision
 from ..media.scenes import MAX_SCENE_MS, DetectedScene, detect_scenes, grab_frame
 from ..prompts import render
 from ..storage import Storage
+from ..tasks import stop_if
 from ..workspace import Workspace
 
 MAX_SCENES = 80  # beyond this the descriptions cost more than they explain
@@ -71,8 +72,11 @@ class VisionBuilder:
         run = self._store.scene_run(video.id)
         return run is not None and run[0] == self.key(video)
 
-    def build(self, video: VideoRecord, report: Report) -> VisionStats:
+    def build(
+        self, video: VideoRecord, report: Report, *, cancelled: Callable[[], bool] | None = None
+    ) -> VisionStats:
         """Detect scenes, then describe the ones that have no description yet."""
+        stop_if(cancelled)
         if self._vision is None:
             return VisionStats(scenes=0, described=0)
         detected = _merge(
@@ -93,6 +97,7 @@ class VisionBuilder:
         for position, scene in enumerate(detected):
             if position in done:
                 continue
+            stop_if(cancelled)
             frame = self._workspace.video_dir(video.id) / "scenes" / f"{position}.jpg"
             if not frame.exists() and not grab_frame(
                 video.path, (scene.start_ms + scene.end_ms) // 2, frame

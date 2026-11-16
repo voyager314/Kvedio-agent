@@ -50,6 +50,7 @@ from .format import (
 HELP = """\
 /help              显示本说明
 /model             列出各角色的模型与端点
+/cancel            取消正在跑的作业，并清空排队
 @路径 问题         引用视频并分析，路径含空格加引号
 直接输入问题       就当前视频追问，结论带时间戳
 /quit              退出"""
@@ -512,8 +513,25 @@ class Workbench(App[None]):
                 self._say(HELP)
             case "model":
                 self._list_models(command.arguments)
+            case "cancel":
+                self._cancel()
             case _:
                 self._say(f"未知命令 /{command.name}；/help 查看全部", style="yellow")
+
+    def _cancel(self) -> None:
+        """Stop the running job and drop what is queued; finished work stays."""
+        dropped = len(self._queue)
+        self._queue.clear()
+        running = self._watched is not None and self._pipeline.cancel(self._watched)
+        if not running and not dropped:
+            self._say("没有正在运行的作业。", style="dim")
+            return
+        parts = []
+        if running:
+            parts.append("已请求取消当前作业")
+        if dropped:
+            parts.append(f"清空排队 {dropped} 条")
+        self._say("；".join(parts) + "。", style="yellow")
 
     def _list_models(self, arguments: tuple[str, ...]) -> None:
         """Show what each role calls; changing a model is an edit to the file, not a command."""
