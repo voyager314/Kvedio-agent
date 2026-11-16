@@ -75,15 +75,12 @@ reader who knows a module's role knows where to open it without searching.
 
 | Package | Role |
 | --- | --- |
-| `cli/` | Process entry: parse subcommands, assemble dependencies, hand control to the workbench. |
-| `tui/` | Terminal surface: screens, panels, the mapping from events to rendering. |
-| `domain/` | Values passed across layers: video records, jobs, tasks, events. No I/O. |
-| `config/` | User configuration: discovery, template creation, validation, redaction, program state write-back. |
-| `storage/` | SQLite connection, schema migration, repositories. |
-| `tasks/` | Task state machine, event bus, DAG scheduler, worker pool. |
-| `pipeline/` | Turns one request into a task graph and drives the stages. |
-| `media/` | Decode-level work: probe, audio extraction, frame sampling, scene boundaries. |
-| `default/` | Packaged templates: configuration sample, prompts. |
+| `core/` | The engine: domain values, configuration, storage, task scheduling, media work, pipelines. Imports no interface. |
+| `interface/` | Terminal surface: subcommands, screens, panels, the event pump. |
+| `tools/` | Capabilities exposed to the supervisor, one module per family. |
+| `prompts/` | Prompt templates. |
+| `default/` | Packaged defaults created on first run: the configuration sample. |
+| `temp/` | Scratch scripts and trial output. Covered by `.gitignore`; nothing here is committed. |
 
 A package absent from this table does not exist. Introducing one edits this table
 first, then the tree.

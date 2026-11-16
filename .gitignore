@@ -12,3 +12,6 @@ dist/
 .workbuddy/
 CLAUDE.md
 
+
+# 包内临时脚本与试验产物
+/src/kvedio_agent1/temp/

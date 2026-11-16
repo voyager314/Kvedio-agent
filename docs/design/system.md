@@ -59,23 +59,26 @@
 
 | 目录 | 角色 | 阶段 |
 | --- | --- | --- |
-| `cli/` | 进程入口：解析子命令、装配依赖、把控制交给工作台 | M0 |
-| `tui/` | Textual 界面：屏幕、面板、把事件映射为渲染 | M0 |
-| `domain/` | 跨层传递的值对象与枚举：视频记录、作业、任务、事件 | M0 |
-| `config/` | 用户配置的发现、模板生成、校验、脱敏，程序状态写回 | M0 |
-| `storage/` | SQLite 连接、模式迁移、仓储 | M0 |
-| `tasks/` | 任务状态机、事件总线、DAG 调度、工作线程池 | M0 |
-| `pipeline/` | 把一次请求翻译成任务图并驱动阶段推进 | M0 |
-| `media/` | 解码级媒体处理：探测、音轨提取、抽帧、场景边界 | M0 起，逐步补齐 |
-| `default/` | 随包分发的模板：配置样例、提示词 | M0 |
-| `workspace/` | 作业目录与产物布局、检查点键 | M1 |
-| `llm/` | 模型接入：OpenAI 兼容客户端、重试、用量记账 | M1 |
-| `asr/` | 转录流水线：切段、并发、合并、检查点 | M1 |
-| `supervisor/` | 意图路由、计划生成、工具暴露、结论合成、质量评估 | M2 |
-| `memory/` | 索引与检索：关键词、向量、证据选取 | M3 |
-| `video/` | 视觉理解：抽帧策略、帧描述、事件抽取 | M4 |
+| `core/` | 引擎总入口：只含系统内部实现，不导入界面 | M0 |
+| `core/domain/` | 跨层传递的值对象与枚举：视频记录、作业、任务、事件 | M0 |
+| `core/config/` | 用户配置的发现、模板生成、校验、脱敏 | M0 |
+| `core/storage/` | SQLite 连接、模式迁移、仓储 | M0 |
+| `core/tasks/` | 任务状态机、事件总线、DAG 调度、工作线程池 | M0 |
+| `core/pipeline/` | 把一次请求翻译成任务图并驱动阶段推进 | M0 |
+| `core/media/` | 解码级媒体处理：探测、音轨提取、抽帧、场景边界 | M0 起，逐步补齐 |
+| `core/workspace/` | 作业目录与产物布局、检查点键 | M1 |
+| `core/llm/` | 模型接入：OpenAI 兼容客户端、重试、用量记账 | M1 |
+| `core/asr/` | 转录流水线：切段、并发、合并、检查点 | M1 |
+| `core/supervisor/` | 意图路由、计划生成、结论合成、质量评估 | M2 |
+| `core/memory/` | 索引与检索：关键词、向量、证据选取 | M3 |
+| `core/video/` | 视觉理解：抽帧策略、帧描述、事件抽取 | M4 |
+| `interface/` | 终端界面：子命令、屏幕、面板、事件泵、输入语法 | M0 |
+| `tools/` | 暴露给监督者的工具实现，一族一模块 | M2 |
+| `prompts/` | 提示词模板 | M2 |
+| `default/` | 随包分发的默认文件：配置样例 | M0 |
+| `temp/` | 一次性脚本与试验产物，被 `.gitignore` 覆盖，不入库 | — |
 
-依赖方向自上而下单向：`cli` → `tui` → `pipeline` → (`asr` `video` `supervisor` `memory`) → (`media` `llm` `storage` `workspace`) → (`domain` `config`)。`domain` 不导入任何同层模块；`storage` 不导入 `pipeline`；`tui` 不导入 `storage`、`media`、`llm`。
+依赖方向单向：`interface` → `core`；`core` 内部 `supervisor` → (`asr` `video` `memory`) → (`media` `llm` `storage` `workspace`) → (`domain` `config`)。`tools` 依赖 `core` 的检索与存储，反向不成立。`prompts` 是数据，不被导入。任何一个模块都不导入 `interface`。
 
 ## 4. 数据模型
 
