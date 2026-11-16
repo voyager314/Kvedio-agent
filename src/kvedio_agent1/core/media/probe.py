@@ -17,6 +17,11 @@ class ProbeError(Exception):
     """The file cannot be treated as media, or does not declare a usable duration."""
 
 
+def decoder_version() -> str:
+    """Decoder build in use, so two machines can be compared from one command."""
+    return f"PyAV {av.__version__} / FFmpeg {av.ffmpeg_version_info}"
+
+
 def probe(path: Path) -> MediaInfo:
     """Read the stream layout and the duration.
 

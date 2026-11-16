@@ -1,2 +1,5 @@
-def main() -> None:
-    print("Hello from kvedio-agent1!")
+"""A local-first long-video understanding agent for the terminal."""
+
+from .interface.cli import main
+
+__all__ = ["main"]
