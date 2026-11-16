@@ -38,7 +38,7 @@
 事件结构固定为四项：种类、发生时刻、所属作业、所属任务，外加一个自由负载（阶段名、进度、计数、耗时）。已定义种类：
 
 - `video.registered` — 一条视频被引用并完成探测
-- `job.queued` `job.started` `job.succeeded` `job.failed` `job.canceled`
+- `job.queued` `job.started` `job.succeeded` `job.partial` `job.failed` `job.canceled`
 - `task.ready` `task.started` `task.progress` `task.succeeded` `task.failed` `task.canceled` `task.skipped`
 - `models.changed` — 某个角色的当前绑定被切换
 - `log.line` — 面向用户的一行说明，不是调试日志
@@ -48,10 +48,10 @@
 ### 2.3 一次引用的生命周期
 
 1. 输入框提交 `@相对路径 问题`，`pipeline` 解析路径为绝对路径。
-2. 计算指纹（毫秒级），按指纹查库：命中则复用视频行，未命中则插入并探测。
-3. 探测写入时长、容器、视频编解码与分辨率、音轨参数。
-4. 建立作业与任务图并交给调度器。M0 的任务图只有一个探测后的登记任务；M1 起扩展为探测 → 转录 → 索引。
-5. 任务推进以事件呈现，界面按事件更新任务面板、时间轴与证据区。
+2. 计算指纹（毫秒级），按指纹查库：命中则复用视频行，未命中则插入一条只带身份的记录。
+3. 建立作业与任务图。M0 的图只有一个节点——探测，它把时长、容器、编解码与音轨写回视频行，并发出 `video.registered`；M1 起扩展为探测 → 转录 → 索引。
+4. 调度器按依赖推进节点，每次状态变化先落库再发事件。
+5. 界面按事件更新任务面板；探测完成后时间轴显示已知时长，证据区显示流布局。
 
 ## 3. 目录与角色
 
@@ -94,7 +94,6 @@ CREATE TABLE video (
   size_bytes      INTEGER NOT NULL,
   mtime_ns        INTEGER NOT NULL,
   fingerprint     TEXT    NOT NULL UNIQUE,   -- 见 §8
-  content_hash    TEXT,                      -- 全文件 sha256；NULL 表示尚未整读
   duration_ms     INTEGER,                   -- NULL 表示探测未完成
   container       TEXT,
   video_codec     TEXT,
@@ -117,8 +116,7 @@ CREATE TABLE job (
   created_at      TEXT    NOT NULL,
   started_at      TEXT,
   finished_at     TEXT,
-  error           TEXT,                      -- 成功为 NULL
-  plan_json       TEXT                       -- 计划快照，作业开始后不改写
+  error           TEXT                       -- 成功为 NULL
 );
 
 -- 任务图的一个节点。依赖以同表 id 的 JSON 数组表示，值而非实体。
@@ -131,17 +129,17 @@ CREATE TABLE task (
   depends_on      TEXT    NOT NULL,          -- JSON 数组
   dependency_mode TEXT    NOT NULL,          -- all|any|partial
   attempt         INTEGER NOT NULL DEFAULT 0,
+  max_attempts    INTEGER NOT NULL DEFAULT 1, -- 允许的总运行次数，1 表示不重试
   progress        REAL    NOT NULL DEFAULT 0,
   started_at      TEXT,
   finished_at     TEXT,
-  error           TEXT,
-  result_ref      TEXT                       -- 产物引用，仓库内路径或表内 id
+  error           TEXT
 );
 
 CREATE INDEX idx_task_job ON task(job_id);
 ```
 
-`transcript_segment`（M1）、`artifact`（M1）、`checkpoint`（M1）随对应阶段建立，字段定义在建立该表时补入本文档。
+`transcript_segment`（M1）、`artifact`（M1）、`checkpoint`（M1）随对应阶段建立，字段定义在建立该表时补入本文档。产物指针与计划快照同理：它们是 M1 的列，不在 M0 的表里留空列。
 
 ### 4.2 引用规则
 
@@ -149,7 +147,7 @@ CREATE INDEX idx_task_job ON task(job_id);
 
 ### 4.3 迁移
 
-`schema_version` 单行表记录当前版本。启动时若版本低于代码期望，按顺序执行迁移函数；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。库文件损坏或版本高于代码时，拒绝启动并给出路径。
+`PRAGMA user_version` 记录当前版本。启动时若版本低于代码期望，按顺序执行迁移；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。版本高于代码时拒绝打开：那些列没有反向迁移，继续写会静默丢数据。
 
 ## 5. 任务模型
 
@@ -188,9 +186,9 @@ pending ──► ready ──► running ──► succeeded
 
 ### 5.3 取消、中断与恢复
 
-- 取消请求写令牌，调度器不再派发新节点，已在跑的节点在下一个检查点退出；退出后的状态是 `canceled`，不是 `failed`。
-- 检查点的最小粒度是一个媒体分片或一次模型调用，取消在两次调用之间生效。
-- 进程退出时仍为 `running` 的任务，在下次启动时被重置为 `ready` 并保留 `attempt`，由调度器重新派发。这是"恢复"而非"重来"：已完成的任务不会被重算。
+- 取消请求写令牌，调度器不再派发新节点，已在跑的节点在下一个检查点退出；退出后的状态是 `canceled`，不是 `failed`。检查点的最小粒度是一个媒体分片或一次模型调用。（M5 实现）
+- 进程退出时仍为 `running` 的作业，在下次启动时连同其未完成节点一起判为 `failed`，原因写明"进程退出时作业未完成"。没有检查点的阶段无从判断做到哪一步，把它报告为运行中或待执行都是对读者的误导。
+- 实现了检查点的阶段（M1 起）在重启后按 `ready` 重新派发：已完成的分片不会重算，这是"恢复"；未实现检查点的阶段只能"重来"，两种行为在界面上必须可区分。
 
 ### 5.4 部分成功
 
@@ -255,7 +253,7 @@ runtime:
 ## 8. 视频身份、指纹与检查点
 
 - **指纹** = `sha256(size ‖ mtime_ns ‖ 头 4 MiB ‖ 尾 4 MiB)`。一次引用只读 8 MiB，毫秒级完成，足以发现替换、截断与改动。
-- **内容哈希** = 全文件 sha256，在首次顺序解码时顺带算出（解码本来就要读完整份文件），写入 `content_hash`。此后同一内容换路径、改名，都能凭哈希命中已有产物。
+- **内容哈希** = 全文件 sha256，在首次顺序解码时顺带算出（解码本来就要读完整份文件），随该阶段加入 `video` 表。此后同一内容换路径、改名，都能凭哈希命中已有产物。
 - **复用键** = `content_hash + stage + model_id + params_hash`。`content_hash` 为空时退回指纹，并在检查点记录里标注"可能重复计算"。
 - 源文件变动不做自动跟踪：打开作业前重算指纹，与库里不一致时该视频的既有产物视为失效，界面提示"源文件已变化"，作业需重新开始。
 
@@ -295,7 +293,7 @@ runtime:
 - 作业与任务图落库并调度，状态迁移由状态机校验。
 - 工作台四区渲染，任务面板随事件实时更新。
 - 首次运行生成配置模板；`/model` 查看与切换绑定并写回状态文件。
-- 启动时把上次残留的 `running` 任务恢复为 `ready`。
+- 启动时把上次残留的 `running` 作业连同未完成节点判为失败，并写明原因。
 
 验收：一条真实 mp4 被引用后，时长、分辨率、音轨在界面可见；改动文件后再次引用产生新记录并在对话区说明；非法迁移、坏配置、密钥泄漏各有测试；`uv run pytest` 与 `ruff check` 通过。
 
