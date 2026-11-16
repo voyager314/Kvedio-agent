@@ -91,3 +91,4 @@ class JobRecord:
     started_at: datetime | None
     finished_at: datetime | None
     error: str | None  # set when the job ends as failed or partial
+    agents: tuple[str, ...] = ("asr", "video")  # branches this request asked to run

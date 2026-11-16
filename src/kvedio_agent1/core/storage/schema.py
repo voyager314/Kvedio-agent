@@ -12,7 +12,7 @@ import sqlite3
 
 from .errors import StorageError
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _INITIAL = """
 CREATE TABLE video (
@@ -210,6 +210,10 @@ ALTER TABLE answer ADD COLUMN stage TEXT NOT NULL DEFAULT 'final';
 ALTER TABLE answer ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
 """
 
+_JOB_AGENTS = """
+ALTER TABLE job ADD COLUMN agents TEXT NOT NULL DEFAULT '["asr","video"]';
+"""
+
 _MIGRATIONS: dict[int, str] = {
     1: _INITIAL,
     2: _TRANSCRIPT,
@@ -219,6 +223,7 @@ _MIGRATIONS: dict[int, str] = {
     6: _EVENTS,
     7: _USAGE,
     8: _ANSWER_REVISIONS,
+    9: _JOB_AGENTS,
 }
 
 

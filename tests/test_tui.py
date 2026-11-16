@@ -18,6 +18,7 @@ from kvedio_agent1.core.llm import Reply
 from kvedio_agent1.core.memory import MemoryBuilder
 from kvedio_agent1.core.pipeline import Pipeline, Stages
 from kvedio_agent1.core.storage import Storage
+from kvedio_agent1.core.supervisor import Chatting
 from kvedio_agent1.core.tasks import EventBus
 from kvedio_agent1.core.workspace import Workspace
 from kvedio_agent1.interface.tui import Workbench
@@ -43,6 +44,18 @@ class _Embedder:
 
     def embed(self, texts):
         return [[1.0] for _ in texts]
+
+
+class _AnswerChat:
+    """Plays back one supervisor answer."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def complete(self, messages, *, json_mode: bool = False) -> Reply:
+        return Reply(
+            text=self._text, model="stub", prompt_tokens=0, completion_tokens=0
+        )
 
 
 def build(store, workspace, bus, loaded, answerer, transcribe=spoken) -> Pipeline:
@@ -293,6 +306,64 @@ def test_a_preliminary_and_its_supplement_are_each_shown_once(
             app._announce(job.id)
             await pilot.pause()
             assert _chat(app).count("最终文本") == 1
+
+    asyncio.run(scenario())
+    store.close()
+
+
+def test_a_text_file_is_answered_without_creating_a_job(
+    home, tmp_path, make_answerer
+):
+    loaded = load_or_create()
+    store = Storage(tmp_path / "kvedio.db")
+    bus = EventBus()
+    pipeline = build(
+        store, Workspace(tmp_path / "workspace"), bus, loaded, make_answerer(store)
+    )
+    notes = tmp_path / "notes.md"
+    notes.write_text("会议决定先修预算。", encoding="utf-8")
+    chatting = Chatting(store, _AnswerChat("文件里说先修预算。"))
+
+    async def scenario() -> None:
+        app = Workbench(loaded, store, pipeline, bus, chatting=chatting)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#prompt", Input).value = f'@"{notes}" 总结'
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if "文件里说先修预算。" in _chat(app):
+                    break
+            assert "文件里说先修预算。" in _chat(app)
+            assert store.jobs() == []
+
+    asyncio.run(scenario())
+    store.close()
+
+
+def test_a_text_only_request_is_answered_without_a_video(
+    home, tmp_path, make_answerer
+):
+    loaded = load_or_create()
+    store = Storage(tmp_path / "kvedio.db")
+    bus = EventBus()
+    pipeline = build(
+        store, Workspace(tmp_path / "workspace"), bus, loaded, make_answerer(store)
+    )
+    chatting = Chatting(store, _AnswerChat("好的。"))
+
+    async def scenario() -> None:
+        app = Workbench(loaded, store, pipeline, bus, chatting=chatting)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#prompt", Input).value = "帮我写一封邮件"
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if "好的。" in _chat(app):
+                    break
+            assert "好的。" in _chat(app)
+            assert store.jobs() == []
 
     asyncio.run(scenario())
     store.close()

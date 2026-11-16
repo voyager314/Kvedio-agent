@@ -305,6 +305,19 @@ def test_search_finds_segments_by_keyword_and_escapes_wildcards(store, tmp_path)
     assert store.search_segments(video.id, ["不存在的词"], 5) == []
 
 
+def test_a_job_records_which_agents_it_asked_for(store, tmp_path):
+    video = reference(store, tmp_path)
+    job = store.create_job(
+        video.id,
+        "q",
+        [NewTask(id="answer", agent="supervisor", action="a")],
+        agents=("asr",),
+    )
+
+    assert job.agents == ("asr",)
+    assert store.job(job.id).agents == ("asr",)
+
+
 def test_an_answer_keeps_its_citations(store, tmp_path):
     video = reference(store, tmp_path)
     job = store.create_job(video.id, "q", [NewTask(id="answer", agent="supervisor", action="a")])

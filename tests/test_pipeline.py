@@ -21,6 +21,7 @@ from kvedio_agent1.core.llm import Reply
 from kvedio_agent1.core.memory import MemoryBuilder
 from kvedio_agent1.core.pipeline import Pipeline, Stages
 from kvedio_agent1.core.storage import Storage
+from kvedio_agent1.core.supervisor import Route
 from kvedio_agent1.core.tasks import EventBus
 from kvedio_agent1.core.vision import EventStats, VisionStats
 from kvedio_agent1.core.workspace import Workspace
@@ -512,6 +513,55 @@ def test_a_timed_out_branch_still_answers_from_the_other(
     answer = store.answer(finished.id)
     assert answer is not None
     assert answer.citations[0].kind == "scene"
+
+
+def test_a_speech_only_route_builds_no_picture_branch(
+    store, workspace, answerer, sample_video
+):
+    pipeline, _ = build(store, workspace, answerer, vision=_Vision())
+    route = Route("ask_video", ("asr",), "只要台词")
+
+    finished = pipeline.run(pipeline.submit(sample_video, "讲了什么", route))
+
+    tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
+    assert finished.status is JobStatus.SUCCEEDED, finished.error
+    assert finished.agents == ("asr",)
+    assert "vision" not in tasks
+    assert "events" not in tasks
+
+
+def test_a_picture_only_route_builds_no_speech_branch(
+    store, workspace, answerer, sample_video
+):
+    pipeline, _ = build(store, workspace, answerer, vision=_SceneWriter(store))
+    route = Route("ask_video", ("video",), "只看画面")
+
+    finished = pipeline.run(pipeline.submit(sample_video, "画面里在做什么", route))
+
+    tasks = {task.id: task for task in store.tasks_for_job(finished.id)}
+    assert finished.status is JobStatus.SUCCEEDED, finished.error
+    assert finished.agents == ("video",)
+    assert "audio" not in tasks
+    assert "transcribe" not in tasks
+    answer = store.answer(finished.id)
+    assert answer is not None
+    assert answer.citations[0].kind == "scene"
+
+
+def test_a_route_without_agents_answers_from_the_store(
+    store, workspace, answerer, sample_video
+):
+    pipeline, _ = build(store, workspace, answerer)
+    first = pipeline.run(pipeline.submit(sample_video, "讲了什么"))
+    second = pipeline.ask(
+        first.video_id, "再总结一次", Route("ask_video", (), "已有产物")
+    )
+
+    finished = pipeline.run(second)
+
+    assert [task.id for task in store.tasks_for_job(second.id)] == ["answer"]
+    assert finished.agents == ()
+    assert finished.status is JobStatus.SUCCEEDED, finished.error
 
 
 def test_a_running_job_can_be_cancelled(store, workspace, answerer, sample_video):

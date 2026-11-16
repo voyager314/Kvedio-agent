@@ -12,6 +12,7 @@ copy that can drift from it.
 from __future__ import annotations
 
 import queue
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.text import Text
@@ -33,6 +34,8 @@ from ...core.domain import (
 )
 from ...core.pipeline import Pipeline
 from ...core.storage import Storage
+from ...core.supervisor import Chatting, Request, Route, Router
+from ...core.supervisor.routing import TEXT_SUFFIXES
 from ...core.tasks import EventBus
 from ..submission import USAGE, Command, Reference, parse_submission
 from .format import (
@@ -54,9 +57,17 @@ HELP = """\
 /model             列出各角色的模型与端点
 /cancel            取消正在跑的作业，并清空排队
 /usage             列出各模型累计调用的用量
-@路径 问题         引用视频并分析，路径含空格加引号
-直接输入问题       就当前视频追问，结论带时间戳
+@路径 问题         引用视频分析，或引用文本文件作答
+直接输入问题       视频追问，或交给 supervisor 的普通任务
 /quit              退出"""
+
+
+@dataclass(frozen=True)
+class ChatRequest:
+    """A request the supervisor answers itself: text-only or a referenced text file."""
+
+    question: str
+    text_path: Path | None = None
 
 _TASK_COLUMNS = ("task", "agent", "action", "status", "progress")
 _TASK_HEADERS = ("任务", "角色", "动作", "状态", "进度")
@@ -140,7 +151,13 @@ class Workbench(App[None]):
     BINDINGS = [("ctrl+q", "quit", "退出")]
 
     def __init__(
-        self, loaded: Loaded, store: Storage, pipeline: Pipeline, bus: EventBus
+        self,
+        loaded: Loaded,
+        store: Storage,
+        pipeline: Pipeline,
+        bus: EventBus,
+        router: Router | None = None,
+        chatting: Chatting | None = None,
     ) -> None:
         super().__init__()
         self._config = loaded.config
@@ -150,12 +167,14 @@ class Workbench(App[None]):
         self._pipeline = pipeline
         self._bus = bus
         self._events = bus.subscribe()
+        self._router = router or Router()
+        self._chatting = chatting
         self._watched: str | None = None
         self._task_rows: set[str] = set()
         self._latest: JobRecord | None = None
         self._running_jobs: set[str] = set()
         self._streamed: list[str] = []  # the answer currently being written
-        self._queue: list[Reference | str] = []  # requests waiting for the worker
+        self._queue: list[Reference | ChatRequest | str] = []  # requests waiting
         self._busy = False
         self._shown: dict[str, int] = {}  # job id -> answer revision already in the chat
 
@@ -205,10 +224,12 @@ class Workbench(App[None]):
         event.input.value = ""
         if isinstance(submission, Command):
             self._command(submission)
+        elif submission.path.suffix.lower() in TEXT_SUFFIXES:
+            self._enqueue(ChatRequest(submission.question, submission.path))
         else:
             self._enqueue(submission)
 
-    def _enqueue(self, item: Reference | str) -> None:
+    def _enqueue(self, item: Reference | ChatRequest | str) -> None:
         """Put one request in line; a second job must not re-run the first job's stages."""
         self._queue.append(item)
         if self._busy:
@@ -223,6 +244,8 @@ class Workbench(App[None]):
         self._busy = True
         if isinstance(item, Reference):
             self._start_reference(item)
+        elif isinstance(item, ChatRequest):
+            self._start_chat(item)
         else:
             self._start_question(item)
 
@@ -232,13 +255,19 @@ class Workbench(App[None]):
         self._drain()
 
     def _start_reference(self, reference: Reference) -> None:
-        """Reference and analyse on a worker thread; only events come back from it."""
+        """Reference a video; the router decides which branches it needs."""
         self._say(f"引用 {reference.path.name}：{reference.question}")
 
         def work() -> None:
             started = False
             try:
-                job = self._pipeline.submit(reference.path, reference.question)
+                route = self._route(Request(reference.question, path=reference.path))
+                if route.kind == "text_file":
+                    self._chat_now(reference.question, reference.path, None)
+                    return
+                if route.kind == "chat":
+                    route = Route("analyze_video", ("asr", "video"), route.reason)
+                job = self._pipeline.submit(reference.path, reference.question, route)
                 started = True
                 self._pipeline.run(job)
             except Exception as error:  # a dying worker must speak rather than vanish silently
@@ -250,18 +279,21 @@ class Workbench(App[None]):
         self.run_worker(work, thread=True, group="reference")
 
     def _start_question(self, question: str) -> None:
-        """Ask about the video on screen; the answer cites what the store holds."""
-        if self._latest is None:
-            self._say("还没有引用视频：先用 @路径 问题 引用一个。", style="yellow")
-            self._release()
-            return
-        video_id = self._latest.video_id
+        """Ask about the video on screen, or hand a text task to the supervisor."""
         self._say(f"提问：{question}")
 
         def work() -> None:
             started = False
             try:
-                job = self._pipeline.ask(video_id, question)
+                video = self._video_on_screen()
+                route = self._route(self._request(question, video))
+                if route.kind in ("chat", "text_file"):
+                    self._chat_now(question, None, video)
+                    return
+                if video is None:
+                    self._chat_now(question, None, None)
+                    return
+                job = self._pipeline.ask(video.id, question, route)
                 started = True
                 self._pipeline.run(job)
             except Exception as error:
@@ -272,12 +304,61 @@ class Workbench(App[None]):
 
         self.run_worker(work, thread=True, group="answer")
 
-    def _ask(self, question: str) -> None:
-        """Queue a question about the video on screen, if there is one."""
-        # A reference may still be starting: the video is known once its job is watched.
-        if self._latest is None and not self._busy:
-            self._say("还没有引用视频：先用 @路径 问题 引用一个。", style="yellow")
+    def _start_chat(self, request: ChatRequest) -> None:
+        """Answer a text file or a text-only request on a worker thread."""
+        self._say(f"提问：{request.question}")
+
+        def work() -> None:
+            try:
+                self._chat_now(request.question, request.text_path, self._video_on_screen())
+            except Exception as error:
+                self._notify(f"作答中断：{error}")
+            finally:
+                self.call_from_thread(self._release)
+
+        self.run_worker(work, thread=True, group="chat")
+
+    def _route(self, request: Request) -> Route:
+        """Ask the router, and leave its decision in the chat as one trace line."""
+        route = self._router.route(request)
+        detail = f"（{route.reason}）" if route.reason else ""
+        self._notify(f"路由：{route.kind}{detail}")
+        return route
+
+    def _request(self, question: str, video: VideoRecord | None) -> Request:
+        """Build the router's view of the request from what the store already holds."""
+        if video is None:
+            return Request(question)
+        transcript = self._store.transcript(video.id)
+        return Request(
+            question,
+            video=video,
+            transcript_ready=(
+                transcript is not None and transcript.ready and transcript.segment_count > 0
+            ),
+            scenes=len(self._store.scenes(video.id)),
+            events=len(self._store.events(video.id)),
+        )
+
+    def _chat_now(
+        self, question: str, text_path: Path | None, video: VideoRecord | None
+    ) -> None:
+        """Run the supervisor's own answer on the calling worker; never touches widgets."""
+        if self._chatting is None:
+            self._notify("未配置对话模型：supervisor")
             return
+        reply = self._chatting.answer(question, video=video, text_path=text_path)
+        self._notify(reply.text)
+        if reply.notes:
+            self._notify(" · ".join(reply.notes))
+
+    def _video_on_screen(self) -> VideoRecord | None:
+        if self._latest is None:
+            return None
+        return self._store.video(self._latest.video_id)
+
+    def _ask(self, question: str) -> None:
+        """Queue a question; the router decides whether the supervisor answers it."""
         self._enqueue(question)
 
     def _notify(self, message: str) -> None:

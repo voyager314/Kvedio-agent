@@ -38,7 +38,7 @@ from ..domain import (
 from ..media import extract_audio, identify, probe
 from ..memory import MemoryBuilder
 from ..storage import Storage, StorageError
-from ..supervisor import Answering
+from ..supervisor import Answering, Route
 from ..tasks import (
     Cancellation,
     Cancelled,
@@ -95,11 +95,13 @@ class Pipeline:
         self._cancellations: dict[str, Cancellation] = {}
         self._tokens = threading.Lock()
 
-    def submit(self, path: Path, question: str) -> JobRecord:
+    def submit(self, path: Path, question: str, route: Route | None = None) -> JobRecord:
         """Register the file, then ask the question about it.
 
-        Raises ``OSError`` when the file cannot be read and ``StorageError`` when
-        the database refuses the rows; no job exists afterwards in either case.
+        ``route`` decides which branches the job asks for; ``None`` keeps the
+        full two-branch analysis. Raises ``OSError`` when the file cannot be read
+        and ``StorageError`` when the database refuses the rows; no job exists
+        afterwards in either case.
         """
         identity = identify(path)
         video = self._store.register_video(
@@ -108,19 +110,30 @@ class Pipeline:
             mtime_ns=identity.mtime_ns,
             fingerprint=identity.fingerprint,
         )
-        return self.ask(video.id, question)
+        return self.ask(video.id, question, route)
 
-    def ask(self, video_id: int, question: str) -> JobRecord:
+    def ask(self, video_id: int, question: str, route: Route | None = None) -> JobRecord:
         """Persist a question about a video already in the store, with the nodes it needs."""
         video = self._store.video(video_id)
         if video is None:
             raise StorageError(f"视频不存在：{video_id}")
-        job = self._store.create_job(video_id, question, self._graph_for(video))
+        decided = route or Route("ask_video", ("asr", "video"), "默认分析两路")
+        job = self._store.create_job(
+            video_id,
+            question,
+            self._graph_for(video, decided.agents),
+            agents=decided.agents,
+        )
         self._bus.publish(
             Event.stamp(
                 EventKind.JOB_QUEUED,
                 job_id=job.id,
-                payload={"question": question, "video_id": video_id},
+                payload={
+                    "question": question,
+                    "video_id": video_id,
+                    "route": decided.kind,
+                    "agents": list(decided.agents),
+                },
             )
         )
         return job
@@ -167,27 +180,32 @@ class Pipeline:
         signal.cancel()
         return True
 
-    def _graph_for(self, video: VideoRecord) -> tuple[NewTask, ...]:
-        """The nodes whose output is missing, wired as two branches that meet at the answer.
+    def _graph_for(self, video: VideoRecord, agents: tuple[str, ...]) -> tuple[NewTask, ...]:
+        """The nodes the requested branches still need, meeting at the answer.
 
-        Transcription and picture description read the same file and neither
-        consumes the other's output, so they hang from the probe as separate
-        branches. The answer joins the last node of each branch under
-        ``PARTIAL``: a branch that failed costs its evidence, not the conclusion.
+        Only a branch named in ``agents`` is built. Transcription and picture
+        description read the same file and neither consumes the other's output,
+        so they hang from the probe as separate branches. The answer joins the
+        last node of each branch under ``PARTIAL``: a branch that failed costs its
+        evidence, not the conclusion.
 
-        When both branches can still deliver a citable source, a preliminary
-        answer runs on the first one to arrive. The final answer waits for the
-        preliminary and both branches: it reads the earlier text as a prior, so
-        the two passes cannot race to overwrite each other.
+        When both branches are requested and can still deliver a citable source,
+        a preliminary answer runs on the first one to arrive. The final answer
+        waits for the preliminary and both branches: it reads the earlier text as
+        a prior, so the two passes cannot race to overwrite each other.
         """
         tasks: list[NewTask] = []
         source: tuple[str, ...] = ()
         if video.media is None:
             tasks.append(NewTask(id="probe", agent="media", action="probe"))
             source = ("probe",)
-        spoken = self._spoken_branch(video, source, tasks)
-        seen = self._visual_branch(video, source, tasks)
-        early = self._early_graph(video, spoken, seen, tasks)
+        spoken = self._spoken_branch(video, source, tasks) if "asr" in agents else ()
+        seen = self._visual_branch(video, source, tasks) if "video" in agents else ()
+        early = (
+            self._early_graph(video, spoken, seen, tasks)
+            if "asr" in agents and "video" in agents
+            else ()
+        )
         joined = _join(spoken, seen, early)
         tasks.append(
             NewTask(

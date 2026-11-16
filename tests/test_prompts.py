@@ -74,6 +74,55 @@ def test_the_answer_receives_the_earlier_conclusion_when_updating():
     assert "先前的结论 [00:01]。" in text
 
 
+def test_the_chat_prompt_carries_the_file_and_the_evidence():
+    text = prompts.render(
+        "chat",
+        question="q",
+        text_file="notes.md",
+        text="文件正文",
+        video_name="talk.mp4",
+        evidence=(Evidence(0, 5_000, "预算不足"),),
+        duration_ms=5_000,
+    )
+
+    assert "notes.md" in text
+    assert "文件正文" in text
+    assert "[00:00] 预算不足" in text
+    assert "No file or video was supplied" not in text
+
+
+def test_the_chat_prompt_says_when_nothing_was_supplied():
+    text = prompts.render(
+        "chat",
+        question="q",
+        text_file=None,
+        text="",
+        video_name=None,
+        evidence=(),
+        duration_ms=0,
+    )
+
+    assert "No file or video was supplied" in text
+
+
+def test_the_route_prompt_names_both_agents_and_the_supervisor_tools():
+    text = prompts.render(
+        "route",
+        question="q",
+        video_name="talk.mp4",
+        transcript_state="absent",
+        scenes=0,
+        events=0,
+        text_file=None,
+        no_video=False,
+    )
+
+    assert "asr_agent" in text
+    assert "video_agent" in text
+    assert "read_text_file" in text
+    assert "Integrating the two agents" in text
+
+
 def test_the_absence_prompt_binds_the_language_too():
     text = prompts.render("no_evidence", question="what did they decide", limits=())
     assert "language of the question" in text.lower()

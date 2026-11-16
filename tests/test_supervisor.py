@@ -382,6 +382,26 @@ def test_a_failed_vision_run_is_named_in_the_conclusion(store):
     assert "Evidence not available" in chat.calls[1][0].content
 
 
+def test_a_branch_the_request_did_not_ask_for_is_not_called_a_failure(store):
+    video, _ = prepare(store)
+    job = store.create_job(
+        video.id,
+        "预算够吗",
+        [NewTask(id="answer", agent="supervisor", action="answer")],
+        agents=("asr",),
+    )
+    chat = ScriptedChat([plan(("search", {"query": "预算"})), "预算还差二十万 [00:05]。"])
+
+    answer = Answering(store, EventBus(), chat, "chat-model").answer(
+        job, lambda fraction, message: None
+    )
+
+    assert answer.text == "预算还差二十万 [00:05]。"
+    prompt = chat.calls[1][0].content
+    assert "本次未要求画面分析" in prompt
+    assert "画面描述不可用" not in prompt
+
+
 def test_a_preliminary_is_stored_and_the_final_integrates_it(store):
     video, _ = prepare(store)
     job = store.create_job(

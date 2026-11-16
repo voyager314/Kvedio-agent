@@ -139,12 +139,24 @@ class Storage:
             ).fetchall()
         return [_video(row) for row in rows]
 
-    def create_job(self, video_id: int, question: str, tasks: Sequence[NewTask]) -> JobRecord:
+    def create_job(
+        self,
+        video_id: int,
+        question: str,
+        tasks: Sequence[NewTask],
+        *,
+        agents: tuple[str, ...] = ("asr", "video"),
+    ) -> JobRecord:
         """Persist a job and its pending nodes as one transaction.
 
-        Raises when a node id repeats or a dependency names a node outside the
-        graph: either would leave the job waiting forever.
+        ``agents`` records which branches the request asked to run, so a later
+        answer can tell "not requested" from "requested but failed". Raises when
+        a node id repeats, a dependency names a node outside the graph, or an
+        agent name is unknown: each would leave the job unable to finish.
         """
+        unknown_agents = sorted(set(agents) - {"asr", "video"})
+        if unknown_agents:
+            raise StorageError(f"未知的 agent：{', '.join(unknown_agents)}")
         identifiers = [task.id for task in tasks]
         repeated = sorted({name for name in identifiers if identifiers.count(name) > 1})
         if repeated:
@@ -162,9 +174,16 @@ class Storage:
         try:
             with self._lock, self._connection:
                 self._connection.execute(
-                    "INSERT INTO job (id, video_id, question, status, created_at)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (job_id, video_id, question, JobStatus.QUEUED.value, moment),
+                    "INSERT INTO job (id, video_id, question, status, created_at, agents)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        job_id,
+                        video_id,
+                        question,
+                        JobStatus.QUEUED.value,
+                        moment,
+                        json.dumps(list(agents)),
+                    ),
                 )
                 self._connection.executemany(
                     "INSERT INTO task (job_id, id, agent, action, status, depends_on,"
@@ -883,6 +902,7 @@ def _job(row: sqlite3.Row) -> JobRecord:
         started_at=_moment(row["started_at"]) if row["started_at"] else None,
         finished_at=_moment(row["finished_at"]) if row["finished_at"] else None,
         error=row["error"],
+        agents=tuple(json.loads(row["agents"])),
     )
 
 

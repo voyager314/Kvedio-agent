@@ -29,7 +29,7 @@ from ..core.media import decoder_version
 from ..core.memory import MemoryBuilder
 from ..core.pipeline import Pipeline, Stages
 from ..core.storage import Storage, StorageError
-from ..core.supervisor import Answering
+from ..core.supervisor import Answering, Chatting, Router
 from ..core.tasks import EventBus
 from ..core.vision import EventBuilder, VisionBuilder
 from ..core.workspace import Workspace
@@ -80,7 +80,16 @@ def _workbench() -> int:
             events=_events_stage(loaded.config, store, chat),
             answering=_answering_stage(loaded.config, store, bus, chat, embedder),
         )
-        Workbench(loaded, store, Pipeline(store, bus, stages), bus).run()
+        router = Router(chat)
+        chatting = Chatting(store, chat, embedder) if chat is not None else None
+        Workbench(
+            loaded,
+            store,
+            Pipeline(store, bus, stages),
+            bus,
+            router,
+            chatting,
+        ).run()
     finally:
         store.close()
     return 0

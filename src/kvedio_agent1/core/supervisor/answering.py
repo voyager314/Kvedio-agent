@@ -188,6 +188,7 @@ class Answering:
         and a track the file does not have is a limit, not a failure.
         """
         tasks = {task.id: task for task in self._store.tasks_for_job(job.id)}
+        requested = set(job.agents)
         transcript = self._store.transcript(video.id)
         scenes = self._store.scenes(video.id)
         events = self._store.events(video.id)
@@ -206,6 +207,8 @@ class Answering:
         if not spoken:
             if video.media.audio_codec is None:
                 limits.append("该视频没有音轨，没有文字转录")
+            elif "asr" not in requested:
+                limits.append("本次未要求文字分析")
             elif _producing(tasks, "transcribe"):
                 limits.append("文字转录仍在生成")
                 pending.append("文字转录")
@@ -224,6 +227,8 @@ class Answering:
         if not scenes:
             if video.media.video_codec is None:
                 limits.append("该视频没有画面，没有场景描述")
+            elif "video" not in requested:
+                limits.append("本次未要求画面分析")
             elif _producing(tasks, "vision"):
                 limits.append("画面描述仍在生成")
                 pending.append("画面描述")
