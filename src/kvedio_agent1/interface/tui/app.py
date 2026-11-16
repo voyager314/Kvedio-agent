@@ -57,7 +57,7 @@ HELP = """\
 /model             列出各角色的模型与端点
 /cancel            取消正在跑的作业，并清空排队
 /usage             列出各模型累计调用的用量
-@路径 问题         引用视频分析，或引用文本文件作答
+@路径 [问题]       引用视频先分析；带问题时分析完即用它作答
 直接输入问题       视频追问，或交给 supervisor 的普通任务
 /quit              退出"""
 
@@ -68,6 +68,13 @@ class ChatRequest:
 
     question: str
     text_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class FollowUp:
+    """The words that came with a reference, asked once its analysis is done."""
+
+    question: str
 
 _TASK_COLUMNS = ("task", "agent", "action", "status", "progress")
 _TASK_HEADERS = ("任务", "角色", "动作", "状态", "进度")
@@ -172,9 +179,10 @@ class Workbench(App[None]):
         self._watched: str | None = None
         self._task_rows: set[str] = set()
         self._latest: JobRecord | None = None
+        self._video_id: int | None = None  # the file the panels and questions refer to
         self._running_jobs: set[str] = set()
         self._streamed: list[str] = []  # the answer currently being written
-        self._queue: list[Reference | ChatRequest | str] = []  # requests waiting
+        self._queue: list[Reference | ChatRequest | FollowUp | str] = []  # waiting
         self._busy = False
         self._shown: dict[str, int] = {}  # job id -> answer revision already in the chat
 
@@ -229,7 +237,7 @@ class Workbench(App[None]):
         else:
             self._enqueue(submission)
 
-    def _enqueue(self, item: Reference | ChatRequest | str) -> None:
+    def _enqueue(self, item: Reference | ChatRequest | FollowUp | str) -> None:
         """Put one request in line; a second job must not re-run the first job's stages."""
         self._queue.append(item)
         if self._busy:
@@ -244,6 +252,8 @@ class Workbench(App[None]):
         self._busy = True
         if isinstance(item, Reference):
             self._start_reference(item)
+        elif isinstance(item, FollowUp):
+            self._start_question(item.question, asked_of_analysis=True)
         elif isinstance(item, ChatRequest):
             self._start_chat(item)
         else:
@@ -255,20 +265,40 @@ class Workbench(App[None]):
         self._drain()
 
     def _start_reference(self, reference: Reference) -> None:
-        """Reference a video; the router decides which branches it needs."""
-        self._say(f"引用 {reference.path.name}：{reference.question}")
+        """Analyse the file first; what the user said is asked after it lands.
+
+        The text is not an instruction to the agents: it is a request for the
+        supervisor once they are done. A video is therefore analysed the same way
+        whether or not words came with it, and the words are re-routed against
+        what the analysis actually produced.
+        """
+        said = f"：{reference.question}" if reference.question else ""
+        self._say(f"引用 {reference.path.name}{said}")
+        if reference.question:
+            self._say("先完成分析，再用这句话作答。", style="dim")
 
         def work() -> None:
             started = False
             try:
                 route = self._route(Request(reference.question, path=reference.path))
                 if route.kind == "text_file":
-                    self._chat_now(reference.question, reference.path, None)
+                    if reference.question:
+                        self._chat_now(reference.question, reference.path, None)
+                    else:
+                        self._notify("引用文本文件时，请在后面说明要做什么。")
                     return
-                if route.kind == "chat":
-                    route = Route("analyze_video", ("asr", "video"), route.reason)
-                job = self._pipeline.submit(reference.path, reference.question, route)
+                video = self._pipeline.reference(reference.path)
+                self.call_from_thread(self._focus, video.id)
+                job = self._pipeline.ask(video.id, "", route, analyze_only=True)
+                if job is None:
+                    if reference.question:
+                        self.call_from_thread(self._hold, reference.question)
+                    else:
+                        self._notify("该视频已分析过，可以直接提问。")
+                    return
                 started = True
+                if reference.question:
+                    self.call_from_thread(self._hold, reference.question)
                 self._pipeline.run(job)
             except Exception as error:  # a dying worker must speak rather than vanish silently
                 self._notify(f"无法处理 {reference.path.name}：{error}")
@@ -278,8 +308,24 @@ class Workbench(App[None]):
 
         self.run_worker(work, thread=True, group="reference")
 
-    def _start_question(self, question: str) -> None:
-        """Ask about the video on screen, or hand a text task to the supervisor."""
+    def _hold(self, question: str) -> None:
+        """Park what a reference said until its analysis is finished."""
+        self._queue.insert(0, FollowUp(question))
+
+    def _focus(self, video_id: int) -> None:
+        """Point the panels at the video a reference registered."""
+        self._video_id = video_id
+        self._render_timeline()
+        self._render_evidence()
+        self._render_status()
+
+    def _start_question(self, question: str, *, asked_of_analysis: bool = False) -> None:
+        """Ask about the video on screen, or hand a text task to the supervisor.
+
+        ``asked_of_analysis`` marks the words that came with a reference: the
+        analysis has just run, so a question about the video is answered from what
+        it stored rather than setting the same branches going again.
+        """
         self._say(f"提问：{question}")
 
         def work() -> None:
@@ -290,6 +336,8 @@ class Workbench(App[None]):
                 if route.kind in ("chat", "text_file"):
                     self._chat_now(question, None, video)
                     return
+                if asked_of_analysis:
+                    route = Route("ask_video", (), route.reason)
                 if video is None:
                     self._chat_now(question, None, None)
                     return
@@ -353,9 +401,7 @@ class Workbench(App[None]):
             self._notify(" · ".join(reply.notes))
 
     def _video_on_screen(self) -> VideoRecord | None:
-        if self._latest is None:
-            return None
-        return self._store.video(self._latest.video_id)
+        return self._latest_video()
 
     def _ask(self, question: str) -> None:
         """Queue a question; the router decides whether the supervisor answers it."""
@@ -428,6 +474,8 @@ class Workbench(App[None]):
         table.clear()
         self._task_rows.clear()
         self._latest = self._store.job(job_id)
+        if self._latest is not None:
+            self._video_id = self._latest.video_id
         for task in self._store.tasks_for_job(job_id):
             self._upsert(task)
 
@@ -465,13 +513,17 @@ class Workbench(App[None]):
         if job is None:
             return
         self._latest = job
+        self._video_id = job.video_id
         detail = job.error
         if detail is None:
             video = self._latest_video()
             if video is not None and video.media is not None:
                 detail = format_duration(video.media.duration_ms)
         label = job_status_label(job.status)
-        message = f"作业 {label}：{detail}" if detail else f"作业 {label}"
+        if job.status is JobStatus.SUCCEEDED and self._store.answer(job.id) is None:
+            message = f"分析完成：{detail}" if detail else "分析完成"
+        else:
+            message = f"作业 {label}：{detail}" if detail else f"作业 {label}"
         self._say(message, style="bold red" if job.status is JobStatus.FAILED else "green")
         self._close_stream()
         self._announce_answer(job.id)
@@ -506,7 +558,10 @@ class Workbench(App[None]):
         if self._shown.get(job_id) == answer.revision:
             return
         self._shown[job_id] = answer.revision
-        self._latest = self._store.job(job_id) or self._latest
+        job = self._store.job(job_id)
+        if job is not None:
+            self._latest = job
+            self._video_id = job.video_id
         if partial is True:
             detail = "、".join(pending) if pending else "部分证据"
             self._say(f"初步结论（{detail}尚未到位）", style="yellow")
@@ -642,9 +697,9 @@ class Workbench(App[None]):
         self.query_one("#status", Static).update(" │ ".join(parts))
 
     def _latest_video(self) -> VideoRecord | None:
-        if self._latest is None:
+        if self._video_id is None:
             return None
-        return self._store.video(self._latest.video_id)
+        return self._store.video(self._video_id)
 
     def _report_configuration(self) -> None:
         """Say once which roles cannot call out, rather than leaving a silent status bar."""

@@ -35,17 +35,15 @@ def test_a_text_file_is_routed_without_a_model():
     assert chat.calls == 0
 
 
-def test_a_new_video_sends_the_question_to_the_matching_agent():
+def test_a_new_video_is_analysed_on_both_branches_whatever_the_wording():
     router = Router()
 
-    assert router.route(Request("画面里在做什么", path=Path("talk.mp4"))).agents == (
-        "video",
-    )
-    assert router.route(Request("讲了什么", path=Path("talk.mp4"))).agents == ("asr",)
-    assert router.route(Request("总结一下", path=Path("talk.mp4"))).agents == (
-        "asr",
-        "video",
-    )
+    # The accompanying text is asked afterwards; it does not decide what gets
+    # analysed, so a reference always builds the full index.
+    for question in ("画面里在做什么", "讲了什么", "总结一下", "帮我整理成笔记"):
+        route = router.route(Request(question, path=Path("talk.mp4")))
+        assert route.kind == "analyze_video", question
+        assert route.agents == ("asr", "video"), question
 
 
 def test_a_question_against_ready_products_asks_for_no_new_branch():

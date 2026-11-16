@@ -94,27 +94,136 @@ def test_a_reference_travels_from_the_input_line_to_the_evidence_panel(
             await pilot.pause()
             app.query_one("#prompt", Input).value = f"@{sample_video} 讲了什么"
             await pilot.press("enter")
-            for _ in range(160):
+            for _ in range(200):
                 await pilot.pause(0.05)
                 jobs = store.jobs()
-                if jobs and jobs[0].status is not JobStatus.RUNNING:
+                done = {JobStatus.SUCCEEDED, JobStatus.PARTIAL, JobStatus.FAILED}
+                if len(jobs) == 2 and all(job.status in done for job in jobs):
                     break
             jobs = store.jobs()
-            assert jobs, "作业没有落库"
-            assert jobs[0].status is JobStatus.SUCCEEDED, jobs[0].error
+            assert len(jobs) == 2, [job.status for job in jobs]
+            analysis, answer = sorted(jobs, key=lambda job: job.created_at)
+            assert analysis.status is JobStatus.SUCCEEDED, analysis.error
+            assert answer.status is JobStatus.SUCCEEDED, answer.error
+            assert [task.id for task in store.tasks_for_job(analysis.id)] == [
+                "probe",
+                "audio",
+                "transcribe",
+                "memory",
+            ]
+            assert store.answer(analysis.id) is None  # a reference concludes nothing
+            assert [task.id for task in store.tasks_for_job(answer.id)] == ["answer"]
             for _ in range(40):
                 evidence = str(app.query_one("#evidence", Static).render())
                 if "引用 1 处" in evidence:
                     break
                 await pilot.pause(0.05)
-            assert app.query_one("#tasks", DataTable).row_count == 5
+            assert app.query_one("#tasks", DataTable).row_count == 1
             assert "转录" in str(app.query_one("#status", Static).render())
             assert "引用 1 处" in str(app.query_one("#evidence", Static).render())
             assert "开场白" in str(app.query_one("#evidence", Static).render())
             timeline = str(app.query_one("#timeline", Static).render())
             assert "转录：1 段" in timeline
             assert "记忆：向量 1 条" in timeline
+            assert store.answer(answer.id) is not None
+
+    asyncio.run(scenario())
+    store.close()
+
+
+def test_a_reference_without_words_analyses_and_keeps_the_video_for_the_next_question(
+    home, tmp_path, sample_video, make_answerer
+):
+    loaded = load_or_create()
+    store = Storage(tmp_path / "kvedio.db")
+    bus = EventBus()
+    pipeline = build(
+        store, Workspace(tmp_path / "workspace"), bus, loaded, make_answerer(store)
+    )
+
+    async def scenario() -> None:
+        app = Workbench(loaded, store, pipeline, bus)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#prompt", Input).value = f"@{sample_video}"
+            await pilot.press("enter")
+            done = {JobStatus.SUCCEEDED, JobStatus.PARTIAL, JobStatus.FAILED}
+            for _ in range(200):
+                await pilot.pause(0.05)
+                jobs = store.jobs()
+                if jobs and jobs[0].status in done:
+                    break
+            jobs = store.jobs()
+            assert len(jobs) == 1
+            assert jobs[0].status is JobStatus.SUCCEEDED, jobs[0].error
+            assert store.answer(jobs[0].id) is None
+            for _ in range(40):
+                if "分析完成" in _chat(app):
+                    break
+                await pilot.pause(0.05)
+            assert "分析完成" in _chat(app)
+
+            app.query_one("#prompt", Input).value = "讲了什么"
+            await pilot.press("enter")
+            for _ in range(200):
+                await pilot.pause(0.05)
+                jobs = store.jobs()
+                if len(jobs) == 2 and jobs[0].status in done:
+                    break
+            jobs = store.jobs()
+            assert len(jobs) == 2
+            assert [task.id for task in store.tasks_for_job(jobs[0].id)] == ["answer"]
             assert store.answer(jobs[0].id) is not None
+
+    asyncio.run(scenario())
+    store.close()
+
+
+def broken(audio: Path) -> list[Segment]:
+    raise RuntimeError("转写服务不可用")
+
+
+def test_the_words_do_not_restart_an_analysis_that_already_failed(
+    home, tmp_path, sample_video, make_answerer
+):
+    loaded = load_or_create()
+    store = Storage(tmp_path / "kvedio.db")
+    bus = EventBus()
+    pipeline = build(
+        store,
+        Workspace(tmp_path / "workspace"),
+        bus,
+        loaded,
+        make_answerer(store),
+        transcribe=broken,
+    )
+
+    async def scenario() -> None:
+        app = Workbench(loaded, store, pipeline, bus)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#prompt", Input).value = f"@{sample_video} 讲了什么"
+            await pilot.press("enter")
+            done = {JobStatus.SUCCEEDED, JobStatus.PARTIAL, JobStatus.FAILED}
+            for _ in range(200):
+                await pilot.pause(0.05)
+                jobs = store.jobs()
+                if len(jobs) == 2 and all(job.status in done for job in jobs):
+                    break
+            jobs = store.jobs()
+            assert len(jobs) == 2, [job.status for job in jobs]
+            analysis, follow_up = sorted(jobs, key=lambda job: job.created_at)
+            assert analysis.status is JobStatus.PARTIAL, analysis.error
+            assert [task.id for task in store.tasks_for_job(analysis.id)] == [
+                "probe",
+                "audio",
+                "transcribe",
+                "memory",
+            ]
+            # The question is answered once from what the analysis produced; it
+            # does not send the same branches round again.
+            assert [task.id for task in store.tasks_for_job(follow_up.id)] == ["answer"]
+            assert follow_up.status is JobStatus.FAILED
 
     asyncio.run(scenario())
     store.close()
@@ -145,14 +254,17 @@ def test_a_plain_line_asks_the_video_on_screen(home, tmp_path, sample_video, mak
 
             app.query_one("#prompt", Input).value = "再具体说说"
             await pilot.press("enter")
-            for _ in range(120):
+            for _ in range(200):
                 await pilot.pause(0.05)
                 jobs = store.jobs()
-                if len(jobs) == 2 and jobs[0].status is not JobStatus.RUNNING:
+                done = {JobStatus.SUCCEEDED, JobStatus.PARTIAL, JobStatus.FAILED}
+                if len(jobs) == 3 and all(job.status in done for job in jobs):
                     break
             jobs = store.jobs()
-            assert len(jobs) == 2
-            assert jobs[0].status is JobStatus.SUCCEEDED, jobs[0].error
+            assert len(jobs) == 3
+            assert all(job.status is JobStatus.SUCCEEDED for job in jobs), [
+                job.error for job in jobs
+            ]
             assert [task.id for task in store.tasks_for_job(jobs[0].id)] == ["answer"]
             for _ in range(40):
                 if app.query_one("#tasks", DataTable).row_count == 1:
@@ -209,25 +321,25 @@ def test_a_question_asked_while_busy_waits_and_reuses_the_transcript(
             await pilot.press("enter")
             app.query_one("#prompt", Input).value = "再具体说说"
             await pilot.press("enter")
-            for _ in range(200):
+            for _ in range(220):
                 await pilot.pause(0.05)
                 jobs = store.jobs()
                 done = {JobStatus.SUCCEEDED, JobStatus.PARTIAL, JobStatus.FAILED}
-                if len(jobs) == 2 and all(job.status in done for job in jobs):
+                if len(jobs) == 3 and all(job.status in done for job in jobs):
                     break
             jobs = store.jobs()
-            assert len(jobs) == 2
+            assert len(jobs) == 3
             assert all(job.status is JobStatus.SUCCEEDED for job in jobs), [
                 job.error for job in jobs
             ]
-            reference, question = sorted(jobs, key=lambda job: job.created_at)
+            analysis, follow_up, question = sorted(jobs, key=lambda job: job.created_at)
             assert [task.id for task in store.tasks_for_job(question.id)] == ["answer"]
-            assert [task.id for task in store.tasks_for_job(reference.id)] == [
+            assert [task.id for task in store.tasks_for_job(follow_up.id)] == ["answer"]
+            assert [task.id for task in store.tasks_for_job(analysis.id)] == [
                 "probe",
                 "audio",
                 "transcribe",
                 "memory",
-                "answer",
             ]
 
     asyncio.run(scenario())

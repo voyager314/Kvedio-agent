@@ -95,33 +95,65 @@ class Pipeline:
         self._cancellations: dict[str, Cancellation] = {}
         self._tokens = threading.Lock()
 
-    def submit(self, path: Path, question: str, route: Route | None = None) -> JobRecord:
-        """Register the file, then ask the question about it.
+    def reference(self, path: Path) -> VideoRecord:
+        """Register the file the user pointed at, without queueing any work.
 
-        ``route`` decides which branches the job asks for; ``None`` keeps the
-        full two-branch analysis. Raises ``OSError`` when the file cannot be read
-        and ``StorageError`` when the database refuses the rows; no job exists
-        afterwards in either case.
+        The analysis is a property of the file, not of the wording that
+        accompanied it, so it is a step of its own: what the user said is asked
+        afterwards, once the products are there to answer from.
         """
         identity = identify(path)
-        video = self._store.register_video(
+        return self._store.register_video(
             identity.path,
             size_bytes=identity.size_bytes,
             mtime_ns=identity.mtime_ns,
             fingerprint=identity.fingerprint,
         )
-        return self.ask(video.id, question, route)
 
-    def ask(self, video_id: int, question: str, route: Route | None = None) -> JobRecord:
-        """Persist a question about a video already in the store, with the nodes it needs."""
+    def submit(
+        self,
+        path: Path,
+        question: str,
+        route: Route | None = None,
+        *,
+        analyze_only: bool = False,
+    ) -> JobRecord | None:
+        """Register the file, then ask the question about it.
+
+        ``route`` decides which branches the job asks for; ``None`` keeps the
+        full two-branch analysis. With ``analyze_only`` the graph stops after the
+        branches: the question is answered by a later job, from what they stored.
+        Raises ``OSError`` when the file cannot be read and ``StorageError`` when
+        the database refuses the rows; no job exists afterwards in either case.
+        """
+        video = self.reference(path)
+        return self.ask(video.id, question, route, analyze_only=analyze_only)
+
+    def ask(
+        self,
+        video_id: int,
+        question: str,
+        route: Route | None = None,
+        *,
+        analyze_only: bool = False,
+    ) -> JobRecord | None:
+        """Persist the work this video still needs, and its question if it has one.
+
+        Returns ``None`` when there is nothing left to run — an analysis-only
+        request for a video whose products are all present costs no job, so the
+        caller can ask its question straight away.
+        """
         video = self._store.video(video_id)
         if video is None:
             raise StorageError(f"视频不存在：{video_id}")
         decided = route or Route("ask_video", ("asr", "video"), "默认分析两路")
+        tasks = self._graph_for(video, decided.agents, analyze_only=analyze_only)
+        if not tasks:
+            return None
         job = self._store.create_job(
             video_id,
             question,
-            self._graph_for(video, decided.agents),
+            tasks,
             agents=decided.agents,
         )
         self._bus.publish(
@@ -180,7 +212,9 @@ class Pipeline:
         signal.cancel()
         return True
 
-    def _graph_for(self, video: VideoRecord, agents: tuple[str, ...]) -> tuple[NewTask, ...]:
+    def _graph_for(
+        self, video: VideoRecord, agents: tuple[str, ...], *, analyze_only: bool = False
+    ) -> tuple[NewTask, ...]:
         """The nodes the requested branches still need, meeting at the answer.
 
         Only a branch named in ``agents`` is built. Transcription and picture
@@ -188,6 +222,10 @@ class Pipeline:
         so they hang from the probe as separate branches. The answer joins the
         last node of each branch under ``PARTIAL``: a branch that failed costs its
         evidence, not the conclusion.
+
+        ``analyze_only`` stops the graph after those branches. A reference is
+        analysed before anything is asked of it, so it has no answer node and no
+        preliminary: both would need a question the user has not asked yet.
 
         When both branches are requested and can still deliver a citable source,
         a preliminary answer runs on the first one to arrive. The final answer
@@ -201,6 +239,8 @@ class Pipeline:
             source = ("probe",)
         spoken = self._spoken_branch(video, source, tasks) if "asr" in agents else ()
         seen = self._visual_branch(video, source, tasks) if "video" in agents else ()
+        if analyze_only:
+            return tuple(tasks)
         early = (
             self._early_graph(video, spoken, seen, tasks)
             if "asr" in agents and "video" in agents

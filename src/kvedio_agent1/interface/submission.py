@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-USAGE = "用法：@<路径> <问题>；/help 查看全部命令"
+USAGE = "用法：@<路径> [问题]；/help 查看全部命令"
 
 
 @dataclass(frozen=True)
@@ -13,11 +13,13 @@ class Reference:
     """A file to analyse, with the user's own wording of what to find out.
 
     ``path`` is absolute, resolved against the working directory at submission
-    time; ``question`` is stored verbatim and never rewritten.
+    time; ``question`` is stored verbatim and never rewritten. It is empty when
+    the user only pointed at a file: the analysis stands on its own, and the
+    next message asks whatever they want of it.
     """
 
     path: Path
-    question: str
+    question: str = ""
 
 
 @dataclass(frozen=True)
@@ -35,9 +37,10 @@ def parse_submission(text: str, base: Path) -> Submission | None:
     """Interpret one submitted line.
 
     A line starting with ``/`` is a command. A line starting with ``@`` names a
-    file, optionally in double quotes, followed by the question; a path without a
-    question is refused rather than guessed at. Anything else returns ``None`` so
-    the caller can show the usage instead of inventing an intention.
+    file, optionally in double quotes, followed by the question. The question may
+    be left out: a reference asks for the file to be analysed, and the message
+    after it is answered from what the analysis produced. Anything else returns
+    ``None`` so the caller can show the usage instead of inventing an intention.
     """
     stripped = text.strip()
     if not stripped:
@@ -60,7 +63,7 @@ def parse_submission(text: str, base: Path) -> Submission | None:
         parts = rest.split(maxsplit=1)
         raw_path = parts[0]
         question = parts[1].strip() if len(parts) > 1 else ""
-    if not raw_path or not question:
+    if not raw_path:
         return None
     path = Path(raw_path).expanduser()
     if not path.is_absolute():

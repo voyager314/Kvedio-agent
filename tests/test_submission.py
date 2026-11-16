@@ -28,8 +28,12 @@ def test_an_absolute_path_is_taken_as_given(tmp_path):
     assert parsed.path == absolute
 
 
-def test_a_reference_without_a_question_is_refused():
-    assert parse_submission("@videos/talk.mp4", BASE) is None
+def test_a_reference_may_arrive_without_a_question():
+    parsed = parse_submission("@videos/talk.mp4", BASE)
+
+    assert isinstance(parsed, Reference)
+    assert parsed.path == BASE / "videos/talk.mp4"
+    assert parsed.question == ""
 
 
 def test_a_plain_sentence_is_not_a_reference():

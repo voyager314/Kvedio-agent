@@ -221,7 +221,7 @@ def _rules(request: Request) -> Route | None:
     if request.referenced_text is not None:
         return Route("text_file", (), "引用了文本文件")
     if request.path is not None:
-        return Route("analyze_video", _new_video_agents(request.question), "新引用的视频")
+        return Route("analyze_video", ("asr", "video"), "新引用的视频，建立完整索引")
     if request.video is None:
         return Route("chat", (), "没有在屏的视频")
     if request.has_evidence and _has(request.question, _ARTIFACT_CUES):
@@ -237,17 +237,6 @@ def _rules(request: Request) -> Route | None:
         agents = _missing_agents(request, visual=visual, speech=speech, summary=summary)
         return Route("ask_video", agents, "基于已分析视频作答")
     return None
-
-
-def _new_video_agents(question: str) -> tuple[str, ...]:
-    """Which branches a newly referenced video needs for this question."""
-    visual = _has(question, _VISUAL_CUES)
-    speech = _has(question, _SPEECH_CUES)
-    if visual and not speech:
-        return ("video",)
-    if speech and not visual:
-        return ("asr",)
-    return ("asr", "video")
 
 
 def _missing_agents(

@@ -113,6 +113,47 @@ def test_a_reference_is_probed_transcribed_answered(store, workspace, answerer, 
     assert kinds[-1] is EventKind.JOB_SUCCEEDED
 
 
+def test_a_reference_alone_analyses_without_concluding(
+    store, workspace, answerer, sample_video
+):
+    pipeline, _ = build(store, workspace, answerer)
+
+    job = pipeline.submit(sample_video, "", analyze_only=True)
+    finished = pipeline.run(job)
+
+    assert finished.status is JobStatus.SUCCEEDED, finished.error
+    assert [task.id for task in store.tasks_for_job(job.id)] == [
+        "probe",
+        "audio",
+        "transcribe",
+    ]
+    assert store.answer(job.id) is None
+    assert store.transcript(finished.video_id).ready is True
+
+
+def test_a_reference_with_nothing_left_to_analyse_costs_no_job(
+    store, workspace, answerer, sample_video
+):
+    pipeline, _ = build(store, workspace, answerer)
+    pipeline.run(pipeline.submit(sample_video, "", analyze_only=True))
+
+    assert pipeline.submit(sample_video, "", analyze_only=True) is None
+
+
+def test_the_text_that_came_with_a_reference_is_asked_afterwards(
+    store, workspace, answerer, sample_video
+):
+    pipeline, _ = build(store, workspace, answerer)
+    analysis = pipeline.run(pipeline.submit(sample_video, "", analyze_only=True))
+
+    job = pipeline.ask(analysis.video_id, "讲了什么", Route("ask_video", ()))
+    finished = pipeline.run(job)
+
+    assert finished.status is JobStatus.SUCCEEDED, finished.error
+    assert [task.id for task in store.tasks_for_job(job.id)] == ["answer"]
+    assert store.answer(job.id).citations[0].quote == "开场白"
+
+
 class _Chat:
     def complete(self, messages, *, json_mode: bool = False) -> Reply:
         return Reply(text="一块", model="stub", prompt_tokens=0, completion_tokens=0)
