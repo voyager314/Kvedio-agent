@@ -10,13 +10,16 @@ from datetime import datetime
 class Citation:
     """One stretch of the recording that a conclusion points at.
 
-    ``quote`` is the transcript text at that moment, carried along so a reader can
-    check the conclusion without running the retrieval again.
+    ``quote`` is the text at that moment, carried along so a reader can check the
+    conclusion without running the retrieval again. ``kind`` says where it came
+    from: ``transcript`` for words someone said, ``scene`` for what the picture
+    showed when nobody was talking.
     """
 
     start_ms: int
     end_ms: int  # exclusive
     quote: str
+    kind: str = "transcript"
 
 
 @dataclass(frozen=True)

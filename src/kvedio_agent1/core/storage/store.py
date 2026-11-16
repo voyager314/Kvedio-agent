@@ -31,6 +31,7 @@ from ..domain import (
     Segment,
     TaskRecord,
     TaskStatus,
+    TimelineEvent,
     Transcript,
     VideoRecord,
 )
@@ -423,10 +424,16 @@ class Storage:
             )
             answer_id = int(cursor.lastrowid or 0)
             self._connection.executemany(
-                "INSERT INTO answer_citation (answer_id, start_ms, end_ms, quote)"
-                " VALUES (?, ?, ?, ?)",
+                "INSERT INTO answer_citation (answer_id, start_ms, end_ms, quote, kind)"
+                " VALUES (?, ?, ?, ?, ?)",
                 [
-                    (answer_id, citation.start_ms, citation.end_ms, citation.quote)
+                    (
+                        answer_id,
+                        citation.start_ms,
+                        citation.end_ms,
+                        citation.quote,
+                        citation.kind,
+                    )
                     for citation in citations
                 ],
             )
@@ -444,7 +451,7 @@ class Storage:
             if row is None:
                 return None
             citations = self._connection.execute(
-                "SELECT start_ms, end_ms, quote FROM answer_citation"
+                "SELECT start_ms, end_ms, quote, kind FROM answer_citation"
                 " WHERE answer_id = ? ORDER BY start_ms",
                 (row["id"],),
             ).fetchall()
@@ -668,6 +675,67 @@ class Storage:
                 (video_id, cache_key, total, _instant(_now())),
             )
 
+    def events(self, video_id: int) -> list[TimelineEvent]:
+        """Every named event, in recording order."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT start_ms, end_ms, title, summary FROM event"
+                " WHERE video_id = ? ORDER BY position",
+                (video_id,),
+            ).fetchall()
+        return [
+            TimelineEvent(
+                start_ms=row["start_ms"],
+                end_ms=row["end_ms"],
+                title=row["title"],
+                summary=row["summary"],
+            )
+            for row in rows
+        ]
+
+    def replace_events(
+        self, video_id: int, cache_key: str, events: Sequence[TimelineEvent], model: str = ""
+    ) -> None:
+        """Write a whole event list at once: events are one reading, not pieces to resume."""
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM event WHERE video_id = ?", (video_id,))
+            self._connection.executemany(
+                "INSERT INTO event"
+                " (video_id, cache_key, position, start_ms, end_ms, title, summary,"
+                " model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        video_id,
+                        cache_key,
+                        position,
+                        event.start_ms,
+                        event.end_ms,
+                        event.title,
+                        event.summary,
+                        model,
+                        _instant(_now()),
+                    )
+                    for position, event in enumerate(events)
+                ],
+            )
+
+    def event_run(self, video_id: int) -> tuple[str, int] | None:
+        """The key and event count of the last completed extraction."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT cache_key, total FROM event_run WHERE video_id = ?", (video_id,)
+            ).fetchone()
+        return (row["cache_key"], int(row["total"])) if row is not None else None
+
+    def save_event_run(self, video_id: int, cache_key: str, total: int) -> None:
+        """Record that the whole recording has been cut into events."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO event_run (video_id, cache_key, total, completed_at)"
+                " VALUES (?, ?, ?, ?)",
+                (video_id, cache_key, total, _instant(_now())),
+            )
+
     def abandon_interrupted(self) -> list[str]:
         """Fail every job an earlier process left running, together with its unfinished nodes.
 
@@ -784,7 +852,12 @@ def _answer(row: sqlite3.Row, citations: Sequence[sqlite3.Row]) -> Answer:
         text=row["text"],
         model=row["model"],
         citations=tuple(
-            Citation(start_ms=item["start_ms"], end_ms=item["end_ms"], quote=item["quote"])
+            Citation(
+                start_ms=item["start_ms"],
+                end_ms=item["end_ms"],
+                quote=item["quote"],
+                kind=item["kind"],
+            )
             for item in citations
         ),
         created_at=_moment(row["created_at"]),

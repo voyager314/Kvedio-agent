@@ -403,3 +403,20 @@ def test_scenes_round_trip_and_a_run_marks_completion(store, tmp_path):
 
     store.prune_scenes(video.id, "other-key")
     assert store.scenes(video.id) == []
+
+def test_a_citation_remembers_what_it_rests_on(store, tmp_path):
+    video = reference(store, tmp_path)
+    job = store.create_job(video.id, "q", [NewTask(id="answer", agent="supervisor", action="a")])
+
+    stored = store.record_answer(
+        job.id,
+        video.id,
+        "q",
+        "画面里是白板 [00:01]",
+        "chat",
+        [Citation(start_ms=1_000, end_ms=2_000, quote="白板上写着预算", kind="scene")],
+    )
+
+    assert stored.citations[0].kind == "scene"
+    assert stored.citations[0].quote == "白板上写着预算"
+    assert store.answer(job.id).citations[0].kind == "scene"

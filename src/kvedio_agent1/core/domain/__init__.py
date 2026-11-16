@@ -13,6 +13,7 @@ from .job import (
 )
 from .memory import Coverage
 from .scene import Scene
+from .timeline import TimelineEvent
 from .transcript import Chunk, Segment, Transcript, format_moment
 from .video import FileIdentity, MediaInfo, VideoRecord
 
@@ -34,6 +35,7 @@ __all__ = [
     "Segment",
     "TaskRecord",
     "TaskStatus",
+    "TimelineEvent",
     "Transcript",
     "VideoRecord",
     "format_moment",
