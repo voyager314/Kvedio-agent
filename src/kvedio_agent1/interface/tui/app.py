@@ -143,6 +143,8 @@ class Workbench(App[None]):
         self._task_rows: set[str] = set()
         self._latest: JobRecord | None = None
         self._running_jobs: set[str] = set()
+        self._queue: list[Reference | str] = []  # requests waiting for the worker
+        self._busy = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -190,37 +192,79 @@ class Workbench(App[None]):
         if isinstance(submission, Command):
             self._command(submission)
         else:
-            self._start_reference(submission)
+            self._enqueue(submission)
+
+    def _enqueue(self, item: Reference | str) -> None:
+        """Put one request in line; a second job must not re-run the first job's stages."""
+        self._queue.append(item)
+        if self._busy:
+            self._say("已排队，等当前作业结束。", style="dim")
+        self._drain()
+
+    def _drain(self) -> None:
+        """Start the next request, if nothing is running."""
+        if self._busy or not self._queue:
+            return
+        item = self._queue.pop(0)
+        self._busy = True
+        if isinstance(item, Reference):
+            self._start_reference(item)
+        else:
+            self._start_question(item)
+
+    def _release(self) -> None:
+        """A job ended, or never started; let the next request in line go."""
+        self._busy = False
+        self._drain()
 
     def _start_reference(self, reference: Reference) -> None:
         """Reference and analyse on a worker thread; only events come back from it."""
         self._say(f"引用 {reference.path.name}：{reference.question}")
 
         def work() -> None:
+            started = False
             try:
                 job = self._pipeline.submit(reference.path, reference.question)
+                started = True
                 self._pipeline.run(job)
             except Exception as error:  # a dying worker must speak rather than vanish silently
                 self._notify(f"无法处理 {reference.path.name}：{error}")
+            finally:
+                if not started:
+                    self.call_from_thread(self._release)
 
         self.run_worker(work, thread=True, group="reference")
 
-    def _ask(self, question: str) -> None:
-        """Ask the supervisor about the video on screen; the answer cites its transcript."""
+    def _start_question(self, question: str) -> None:
+        """Ask about the video on screen; the answer cites what the store holds."""
         if self._latest is None:
             self._say("还没有引用视频：先用 @路径 问题 引用一个。", style="yellow")
+            self._release()
             return
         video_id = self._latest.video_id
         self._say(f"提问：{question}")
 
         def work() -> None:
+            started = False
             try:
                 job = self._pipeline.ask(video_id, question)
+                started = True
                 self._pipeline.run(job)
             except Exception as error:
                 self._notify(f"作答中断：{error}")
+            finally:
+                if not started:
+                    self.call_from_thread(self._release)
 
         self.run_worker(work, thread=True, group="answer")
+
+    def _ask(self, question: str) -> None:
+        """Queue a question about the video on screen, if there is one."""
+        # A reference may still be starting: the video is known once its job is watched.
+        if self._latest is None and not self._busy:
+            self._say("还没有引用视频：先用 @路径 问题 引用一个。", style="yellow")
+            return
+        self._enqueue(question)
 
     def _notify(self, message: str) -> None:
         """Hand one line from a worker to the interface thread; the only way a worker may speak."""
@@ -321,6 +365,7 @@ class Workbench(App[None]):
         self._announce_answer(job.id)
         self._render_timeline()
         self._render_evidence()
+        self._release()
 
     def _announce_answer(self, job_id: str) -> None:
         """Print the conclusion in the chat panel, with the moments it points at."""

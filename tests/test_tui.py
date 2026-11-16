@@ -1,4 +1,5 @@
 import asyncio
+import time
 from pathlib import Path
 
 from textual.widgets import DataTable, Input, Static
@@ -31,11 +32,11 @@ class _Embedder:
         return [[1.0] for _ in texts]
 
 
-def build(store, workspace, bus, loaded, answerer) -> Pipeline:
+def build(store, workspace, bus, loaded, answerer, transcribe=spoken) -> Pipeline:
     asr = AsrStage(
         store,
         workspace,
-        spoken,
+        transcribe,
         model="asr-model",
         address="https://asr.example.invalid/v1/audio/transcriptions",
         chunk_ms=300_000,
@@ -155,6 +156,52 @@ def test_a_line_without_a_video_explains_what_to_do(home, tmp_path, make_answere
             await pilot.pause()
             assert prompt.value == ""
             assert store.jobs() == []
+
+    asyncio.run(scenario())
+    store.close()
+
+def test_a_question_asked_while_busy_waits_and_reuses_the_transcript(
+    home, tmp_path, sample_video, make_answerer
+):
+    loaded = load_or_create()
+    store = Storage(tmp_path / "kvedio.db")
+    bus = EventBus()
+
+    def slow(audio: Path) -> list[Segment]:
+        time.sleep(0.4)
+        return spoken(audio)
+
+    pipeline = build(
+        store, Workspace(tmp_path / "workspace"), bus, loaded, make_answerer(store), transcribe=slow
+    )
+
+    async def scenario() -> None:
+        app = Workbench(loaded, store, pipeline, bus)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#prompt", Input).value = f"@{sample_video} 讲了什么"
+            await pilot.press("enter")
+            app.query_one("#prompt", Input).value = "再具体说说"
+            await pilot.press("enter")
+            for _ in range(200):
+                await pilot.pause(0.05)
+                jobs = store.jobs()
+                if len(jobs) == 2 and all(job.status is not JobStatus.RUNNING for job in jobs):
+                    break
+            jobs = store.jobs()
+            assert len(jobs) == 2
+            assert all(job.status is JobStatus.SUCCEEDED for job in jobs), [
+                job.error for job in jobs
+            ]
+            reference, question = sorted(jobs, key=lambda job: job.created_at)
+            assert [task.id for task in store.tasks_for_job(question.id)] == ["answer"]
+            assert [task.id for task in store.tasks_for_job(reference.id)] == [
+                "probe",
+                "audio",
+                "transcribe",
+                "memory",
+                "answer",
+            ]
 
     asyncio.run(scenario())
     store.close()
