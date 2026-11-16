@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..domain import Scene, Segment, VideoRecord
 from ..llm import Vision
-from ..media.scenes import DetectedScene, detect_scenes, grab_frame
+from ..media.scenes import MAX_SCENE_MS, DetectedScene, detect_scenes, grab_frame
 from ..prompts import render
 from ..storage import Storage
 from ..workspace import Workspace
@@ -43,6 +43,7 @@ class VisionBuilder:
         *,
         sample_ms: int = 1_000,
         min_ms: int = 2_000,
+        max_ms: int = MAX_SCENE_MS,
         threshold: float = 0.12,
         max_scenes: int = MAX_SCENES,
     ) -> None:
@@ -51,12 +52,16 @@ class VisionBuilder:
         self._workspace = workspace
         self._sample_ms = sample_ms
         self._min_ms = min_ms
+        self._max_ms = max_ms
         self._threshold = threshold
         self._max_scenes = max(1, max_scenes)
 
     def key(self, video: VideoRecord) -> str:
         model = self._vision.model if self._vision is not None else ""
-        material = f"{video.fingerprint}|{model}|{self._sample_ms}|{self._min_ms}|{self._threshold}"
+        material = (
+            f"{video.fingerprint}|{model}|{self._sample_ms}|{self._min_ms}"
+            f"|{self._max_ms}|{self._threshold}"
+        )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
     def current(self, video: VideoRecord) -> bool:
@@ -75,6 +80,7 @@ class VisionBuilder:
                 video.path,
                 sample_ms=self._sample_ms,
                 min_ms=self._min_ms,
+                max_ms=self._max_ms,
                 threshold=self._threshold,
             ),
             self._max_scenes,

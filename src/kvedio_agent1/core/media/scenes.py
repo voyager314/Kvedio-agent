@@ -18,6 +18,7 @@ import numpy as np
 SIGNATURE_SIZE = 32
 SAMPLE_MS = 1_000
 MIN_SCENE_MS = 2_000
+MAX_SCENE_MS = 90_000  # a fixed camera still needs frames along its length
 THRESHOLD = 0.12  # mean absolute difference on a 0..1 grey signature
 FRAME_WIDTH = 512
 
@@ -35,13 +36,18 @@ def detect_scenes(
     *,
     sample_ms: int = SAMPLE_MS,
     min_ms: int = MIN_SCENE_MS,
+    max_ms: int = MAX_SCENE_MS,
     threshold: float = THRESHOLD,
 ) -> list[DetectedScene]:
-    """Split a video into scenes, each at least ``min_ms`` long.
+    """Split a video into scenes between ``min_ms`` and ``max_ms`` long.
 
     A cut closer than ``min_ms`` to the previous one is ignored: flicker and
     quick camera moves would otherwise produce a scene per half second, and every
     scene costs one model call later.
+
+    A scene longer than ``max_ms`` is divided into equal parts. A fixed camera
+    never cuts, yet what it points at changes — a lecture's slides, a dashboard's
+    numbers — and one frame for ten minutes describes none of it.
     """
     with av.open(str(path)) as container:
         stream = next((item for item in container.streams if item.type == "video"), None)
@@ -63,13 +69,25 @@ def detect_scenes(
                 previous = signature
             moment += sample_ms
     if not scenes:
-        return [DetectedScene(0, max(duration_ms, 1))]
+        return _split(0, max(duration_ms, 1), max_ms)
     if duration_ms - start < min_ms:
         last = scenes.pop()
         scenes.append(DetectedScene(last.start_ms, duration_ms))
     else:
         scenes.append(DetectedScene(start, duration_ms))
-    return scenes
+    return [piece for scene in scenes for piece in _split(scene.start_ms, scene.end_ms, max_ms)]
+
+
+def _split(start_ms: int, end_ms: int, max_ms: int) -> list[DetectedScene]:
+    """Divide a stretch into equal parts no longer than ``max_ms``."""
+    if max_ms <= 0 or end_ms - start_ms <= max_ms:
+        return [DetectedScene(start_ms, end_ms)]
+    parts = (end_ms - start_ms + max_ms - 1) // max_ms
+    step = (end_ms - start_ms) / parts
+    return [
+        DetectedScene(round(start_ms + index * step), round(start_ms + (index + 1) * step))
+        for index in range(parts)
+    ]
 
 
 def grab_frame(

@@ -79,6 +79,7 @@ class RuntimeLimits(BaseModel):
     asr_chunk_seconds: int = Field(default=300, ge=10, le=1800)
     asr_concurrency: int = Field(default=2, ge=1, le=16)
     coverage_block_seconds: int = Field(default=180, ge=30, le=900)
+    scene_max_seconds: int = Field(default=90, ge=10, le=600)
     workspace_dir: Path | None = None
 
 

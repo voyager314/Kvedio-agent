@@ -48,3 +48,9 @@ def test_a_file_without_a_picture_track_is_reported(tmp_path):
 
     with pytest.raises(ValueError, match="视频轨"):
         detect_scenes(audio_only)
+
+def test_a_still_camera_is_sampled_along_its_length(sample_video):
+    scenes = detect_scenes(sample_video, sample_ms=250, min_ms=400, max_ms=300)
+    assert len(scenes) == 4
+    assert scenes[0].start_ms == 0
+    assert scenes[-1].end_ms >= 900

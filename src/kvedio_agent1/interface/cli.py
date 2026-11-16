@@ -146,6 +146,7 @@ def _vision_stage(
             timeout=config.runtime.request_timeout_seconds,
         ),
         workspace,
+        max_ms=config.runtime.scene_max_seconds * 1000,
     )
 
 

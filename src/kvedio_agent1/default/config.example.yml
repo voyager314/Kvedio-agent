@@ -49,5 +49,7 @@ runtime:
   asr_concurrency: 2
   # 覆盖图每一块覆盖的时长，单位秒。
   coverage_block_seconds: 180
+  # 固定机位没有剪辑点，超过这个时长的镜头等分后再描述。
+  scene_max_seconds: 90
   # 产物目录；null 表示 ~/.kvedio_agent/workspace。
   workspace_dir: null
