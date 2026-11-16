@@ -28,6 +28,21 @@ class MediaInfo:
 
 
 @dataclass(frozen=True)
+class FileIdentity:
+    """What identifies a file on disk, computed without reading it whole.
+
+    ``fingerprint`` covers the size, the modification time and two samples, so a
+    rewritten or truncated source is a different identity rather than the same
+    one carrying artifacts that no longer match it.
+    """
+
+    path: Path
+    size_bytes: int
+    mtime_ns: int  # modification time in nanoseconds
+    fingerprint: str  # hex sha256 over size, mtime and the head and tail samples
+
+
+@dataclass(frozen=True)
 class VideoRecord:
     """A referenced file: where it is, what identifies it, what probing reported.
 

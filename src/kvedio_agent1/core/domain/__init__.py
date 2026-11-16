@@ -10,13 +10,14 @@ from .job import (
     TaskRecord,
     TaskStatus,
 )
-from .video import MediaInfo, VideoRecord
+from .video import FileIdentity, MediaInfo, VideoRecord
 
 __all__ = [
     "TERMINAL",
     "DependencyMode",
     "Event",
     "EventKind",
+    "FileIdentity",
     "JobRecord",
     "JobStatus",
     "MediaInfo",
