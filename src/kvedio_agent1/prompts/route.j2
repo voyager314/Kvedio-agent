@@ -65,7 +65,3 @@ Reply with one JSON object and nothing else:
 - `ask_video`: a question about the video on screen; `agents` lists only the branches that must still produce something.
 - `chat`: a text-only task; you answer it yourself, using the video on screen only when it helps.
 - `text_file`: a text file was referenced; you read it and answer.
-
-{% if no_video %}
-No video is on screen, so the route must be `chat` or `text_file` and `agents` must be empty.
-{% endif %}

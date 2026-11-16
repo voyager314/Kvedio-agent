@@ -1,10 +1,21 @@
 """Deciding who does the work: a video agent, or the supervisor itself.
 
-The rules cover the requests whose intent is visible in the wording or the file
-extension. Everything else is put to the supervisor model, which sees the same
-request plus what the video already contains. A reply that cannot be read, or
-that asks for work the request cannot support, falls back to the rules rather
-than sending the job down a path that cannot finish.
+Two kinds of decision meet here, and only one of them is a model's to make.
+
+Facts are settled by the request and the store: a referenced text file, a video
+referenced for the first time, no video on screen at all. Asking a model whether
+``notes.md`` is a video would be theatre, so these are read off the request and
+never put to it.
+
+Intent is the other kind: is this message a question about the recording, or a
+task for the supervisor that merely happens to arrive while a video is on screen?
+That is a semantic judgement, and keyword lists answer it badly — they miss
+paraphrases, fire on negations, and depend on the language the user typed. It goes
+to the supervisor model, which sees the same request plus what the video already
+contains, and whose answer is normalised against what the request can support.
+
+The rules survive only as the fallback for a model that is absent, unreachable,
+or that returns something unusable.
 """
 
 from __future__ import annotations
@@ -24,95 +35,6 @@ TEXT_SUFFIXES = frozenset(
 
 _ROUTES = frozenset({"analyze_video", "ask_video", "chat", "text_file"})
 _AGENTS = frozenset({"asr", "video"})
-
-_VISUAL_CUES = (
-    "画面",
-    "镜头",
-    "屏幕",
-    "演示",
-    "动作",
-    "表情",
-    "图表",
-    "幻灯片",
-    "白板",
-    "出现",
-    "几个人",
-    "看向",
-    "拿起",
-    "picture",
-    "screen",
-    "scene",
-    "visible",
-    "frame",
-    "demo",
-)
-_SPEECH_CUES = (
-    "说",
-    "讲",
-    "提到",
-    "台词",
-    "谁",
-    "对话",
-    "讨论",
-    "录音",
-    "语音",
-    "念",
-    "回答",
-    "speak",
-    "said",
-    "mention",
-    "talk",
-    "discuss",
-    "transcript",
-)
-_SUMMARY_CUES = (
-    "总结",
-    "概括",
-    "讲了什么",
-    "主要内容",
-    "概述",
-    "复盘",
-    "梳理",
-    "summary",
-    "summarize",
-    "overview",
-)
-_GENERAL_CUES = (
-    "写",
-    "翻译",
-    "润色",
-    "邮件",
-    "代码",
-    "生成",
-    "整理成",
-    "笔记",
-    "表格",
-    "解释一下",
-    "帮我",
-    "write",
-    "translate",
-    "draft",
-    "email",
-    "code",
-    "note",
-    "table",
-)
-_ARTIFACT_CUES = (
-    "整理成",
-    "笔记",
-    "表格",
-    "邮件",
-    "翻译",
-    "润色",
-    "写一封",
-    "生成一份",
-    "markdown",
-    "note",
-    "table",
-    "email",
-    "translate",
-    "draft",
-)
 
 
 @dataclass(frozen=True)
@@ -158,14 +80,14 @@ class Route:
 
 
 class Router:
-    """Picks a route with rules first and the supervisor model only when ambiguous."""
+    """Settles the facts itself and puts the intent to the supervisor model."""
 
     def __init__(self, chat: Chat | None = None) -> None:
         self._chat = chat
 
     def route(self, request: Request) -> Route:
         """Return a usable route for one request, never raising for a model failure."""
-        decided = _rules(request)
+        decided = _structural(request)
         if decided is not None:
             return _checked(decided, request)
         if self._chat is not None:
@@ -177,7 +99,7 @@ class Router:
 
 
 def _ask(chat: Chat, request: Request) -> Route:
-    """Put the ambiguous request to the supervisor model as a routing question."""
+    """Put the request's intent to the supervisor model as a routing question."""
     text_file = request.referenced_text
     message = prompts.render(
         "route",
@@ -187,7 +109,6 @@ def _ask(chat: Chat, request: Request) -> Route:
         scenes=request.scenes,
         events=request.events,
         text_file=text_file.name if text_file is not None else None,
-        no_video=request.video is None and request.path is None,
     )
     reply = chat.complete([Message(role="system", content=message)], json_mode=True)
     return _parse(reply.text)
@@ -216,39 +137,15 @@ def _json_object(text: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _rules(request: Request) -> Route | None:
-    """The routes whose intent is visible without a model call."""
+def _structural(request: Request) -> Route | None:
+    """The routes the request and the store already settle, without a model."""
     if request.referenced_text is not None:
         return Route("text_file", (), "引用了文本文件")
     if request.path is not None:
         return Route("analyze_video", ("asr", "video"), "新引用的视频，建立完整索引")
     if request.video is None:
         return Route("chat", (), "没有在屏的视频")
-    if request.has_evidence and _has(request.question, _ARTIFACT_CUES):
-        return Route("chat", (), "文本产出，由 supervisor 使用已有证据")
-    if _has(request.question, _GENERAL_CUES) and not _has(
-        request.question, _VISUAL_CUES + _SPEECH_CUES + _SUMMARY_CUES
-    ):
-        return Route("chat", (), "文本类任务，由 supervisor 直接处理")
-    visual = _has(request.question, _VISUAL_CUES)
-    speech = _has(request.question, _SPEECH_CUES)
-    summary = _has(request.question, _SUMMARY_CUES)
-    if visual or speech or summary:
-        agents = _missing_agents(request, visual=visual, speech=speech, summary=summary)
-        return Route("ask_video", agents, "基于已分析视频作答")
     return None
-
-
-def _missing_agents(
-    request: Request, *, visual: bool, speech: bool, summary: bool
-) -> tuple[str, ...]:
-    """Only the branches whose product is absent; empty means answer from the store."""
-    wanted: list[str] = []
-    if (summary or speech) and not request.transcript_ready:
-        wanted.append("asr")
-    if (summary or visual) and request.scenes <= 0:
-        wanted.append("video")
-    return tuple(dict.fromkeys(wanted))
 
 
 def _checked(route: Route, request: Request) -> Route:
@@ -267,22 +164,16 @@ def _checked(route: Route, request: Request) -> Route:
     if route.kind == "analyze_video" and not agents:
         agents = ("asr", "video")
     if route.kind == "ask_video" and not agents and not request.has_evidence:
-        agents = ("asr", "video")
+        agents = ("asr", "video")  # nothing to answer from: produce it first
     return Route(route.kind, agents, route.reason)
 
 
 def _fallback(request: Request) -> Route:
-    """The route used when neither the rules nor the model produced one."""
+    """What to do when no model can decide: answer from the video that is here."""
     if request.referenced_text is not None:
         return Route("text_file", (), "按文本文件处理")
     if request.path is not None:
         return Route("analyze_video", ("asr", "video"), "按视频分析处理")
     if request.video is None:
         return Route("chat", (), "按普通任务处理")
-    agents = _missing_agents(request, visual=True, speech=True, summary=True)
-    return Route("ask_video", agents, "按已有视频作答")
-
-
-def _has(text: str, words: tuple[str, ...]) -> bool:
-    lowered = text.lower()
-    return any(word.lower() in lowered for word in words)
+    return Route("ask_video", (), "没有可用的路由模型，按视频作答")

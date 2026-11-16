@@ -114,7 +114,6 @@ def test_the_route_prompt_names_both_agents_and_the_supervisor_tools():
         scenes=0,
         events=0,
         text_file=None,
-        no_video=False,
     )
 
     assert "asr_agent" in text
