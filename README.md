@@ -2,7 +2,7 @@
 
 本地长视频理解 agent，界面是终端。用户 `@` 引用磁盘上的视频并提出问题，系统把分析拆成可追踪的任务图，结论的每一条都指向录像中的具体时刻。
 
-当前实现到第一阶段（地基）：引用视频、按内容指纹登记、用 PyAV 自带解码器探测流信息，把每次引用作为作业与任务图落库，工作台随事件实时显示。转录、监督者与视觉理解尚未接入，见 [系统设计](docs/design/system.md) 的里程碑。
+当前实现到第二阶段（转录）：引用视频、按内容指纹登记、PyAV 探测流信息，提取 16 kHz 单声道音轨，按静音边界切片后并发调用在线转写，分段带毫秒时间戳入库，分片级检查点让中断的作业只补未完成的部分。监督者与视觉理解尚未接入，见 [系统设计](docs/design/system.md) 的里程碑。
 
 ## 运行
 
@@ -13,7 +13,7 @@ uv run kvedio-agent1 config     # 配置位置与当前绑定，不显示密钥
 uv run kvedio-agent1 doctor     # 检查配置、数据库与解码器
 ```
 
-首次运行会在 `~/.kvedio_agent/config.yml` 生成模板，并创建 `~/.kvedio_agent/kvedio.db`。模板里每个角色（`supervisor`、`asr`、`video`）对应一个模型：`url` 是完整请求地址，程序原样使用、不拼接路径；`api_key` 推荐写成 `env:变量名`，让密钥留在配置文件之外。更换模型改这个文件，重启生效。
+首次运行会在 `~/.kvedio_agent/config.yml` 生成模板，并创建 `~/.kvedio_agent/kvedio.db`。模板里每个角色（`supervisor`、`asr`、`video`）对应一个模型：`url` 是完整请求地址，程序原样使用、不拼接路径；`api_key` 推荐写成 `env:变量名`，让密钥留在配置文件之外。更换模型改这个文件，重启生效。转录相关的时间粒度与并发在 `runtime.asr_chunk_seconds`、`runtime.asr_concurrency`。
 
 不需要系统安装 ffmpeg：解码器随 `av` 一起安装。
 

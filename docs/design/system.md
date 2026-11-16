@@ -48,13 +48,13 @@
 
 1. 输入框提交 `@相对路径 问题`，`pipeline` 解析路径为绝对路径。
 2. 计算指纹（毫秒级），按指纹查库：命中则复用视频行，未命中则插入一条只带身份的记录。
-3. 建立作业与任务图。M0 的图只有一个节点——探测，它把时长、容器、编解码与音轨写回视频行，并发出 `video.registered`；M1 起扩展为探测 → 转录 → 索引。
+3. 建立作业与任务图：探测 → 提取音轨 → 转录。探测把时长、容器、编解码与音轨写回视频行并发 `video.registered`；没有音轨的视频在这一步之后直接完成其余节点，不算失败。
 4. 调度器按依赖推进节点，每次状态变化先落库再发事件。
-5. 界面按事件更新任务面板；探测完成后时间轴显示已知时长，证据区显示流布局。
+5. 界面按事件更新任务面板；探测完成后时间轴显示时长，转录完成后显示段数、覆盖区间与模型。
 
 ## 3. 目录与角色
 
-目录即角色。一个文件放在哪里，只由它承担的角色决定。「阶段」列表示该目录在哪一步出现，未出现的目录此刻不存在于代码树中。
+目录即角色。一个文件放在哪里，只由它承担的角色决定。「阶段」列表示该目录由哪一步引入。
 
 | 目录 | 角色 | 阶段 |
 | --- | --- | --- |
@@ -138,7 +138,43 @@ CREATE TABLE task (
 CREATE INDEX idx_task_job ON task(job_id);
 ```
 
-`transcript_segment`（M1）、`artifact`（M1）、`checkpoint`（M1）随对应阶段建立，字段定义在建立该表时补入本文档。产物指针与计划快照同理：它们是 M1 的列，不在 M0 的表里留空列。
+一个视频只有一份转录。`cache_key` 记录这份转录是在什么条件下产生的；`completed_at` 为空表示仍在写入，此时任何读取都不引用它。
+
+```sql
+CREATE TABLE transcript (
+  id           INTEGER PRIMARY KEY,
+  video_id     INTEGER NOT NULL UNIQUE REFERENCES video(id),
+  cache_key    TEXT    NOT NULL,          -- 见 §8
+  model        TEXT    NOT NULL,
+  created_at   TEXT    NOT NULL,
+  completed_at TEXT                       -- NULL 表示仍在写入
+);
+
+-- 分段不存序号：顺序由时间给出，并发写入不需要协调编号。
+CREATE TABLE transcript_segment (
+  id            INTEGER PRIMARY KEY,
+  transcript_id INTEGER NOT NULL REFERENCES transcript(id),
+  start_ms      INTEGER NOT NULL,
+  end_ms        INTEGER NOT NULL,         -- 不含；恒大于 start_ms
+  text          TEXT    NOT NULL
+);
+
+CREATE INDEX idx_segment_transcript ON transcript_segment(transcript_id, start_ms);
+
+-- 一个分片一行。重复写入同一分片是覆盖，不是追加。
+CREATE TABLE checkpoint (
+  video_id    INTEGER NOT NULL REFERENCES video(id),
+  stage       TEXT    NOT NULL,           -- 产生该分片的阶段，当前只有 transcribe
+  cache_key   TEXT    NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  start_ms    INTEGER NOT NULL,
+  end_ms      INTEGER NOT NULL,
+  created_at  TEXT    NOT NULL,
+  PRIMARY KEY (video_id, stage, cache_key, chunk_index)
+);
+```
+
+`artifact` 与计划快照仍未建立：前者要等视觉阶段产生独立文件，后者要等监督者生成计划，两者都不在表里留空列。
 
 ### 4.2 引用规则
 
@@ -146,7 +182,7 @@ CREATE INDEX idx_task_job ON task(job_id);
 
 ### 4.3 迁移
 
-`PRAGMA user_version` 记录当前版本。启动时若版本低于代码期望，按顺序执行迁移；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。版本高于代码时拒绝打开：那些列没有反向迁移，继续写会静默丢数据。
+`PRAGMA user_version` 记录当前版本，现为 2。启动时若版本低于代码期望，按顺序执行各版本的迁移脚本；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。版本高于代码时拒绝打开：那些列没有反向迁移，继续写会静默丢数据。
 
 ## 5. 任务模型
 
@@ -196,7 +232,7 @@ pending ──► ready ──► running ──► succeeded
 ## 6. 并发
 
 - 全局上限来自 `runtime.max_global_workers`，作用于同时运行的任务数。
-- 单个任务内部的并发（转录分片、视觉批）由各自阶段限制，不占全局名额之外的额度：阶段内部再开线程池时，其大小由该阶段配置决定，且不超过全局上限。
+- 单个任务内部的并发（转录分片、视觉批）由各自阶段配置：转录用 `runtime.asr_concurrency`，默认 2——一次上传几个几分钟的音频已经足够占满上行带宽，再多只会同时撞上对方限流。
 - 依赖未满足的节点不占用线程。
 - 排队不做公平性承诺：同一作业内按拓扑序，不同作业之间按提交顺序。
 
@@ -227,6 +263,8 @@ runtime:
   retention_days: 30
   max_global_workers: 6
   request_timeout_seconds: 120
+  asr_chunk_seconds: 300       # 单次转写请求承载的音频长度
+  asr_concurrency: 2           # 同时发出的转写请求数
   workspace_dir: null          # null 表示 ~/.kvedio_agent/workspace
 ```
 
@@ -247,8 +285,9 @@ runtime:
 ## 8. 视频身份、指纹与检查点
 
 - **指纹** = `sha256(size ‖ mtime_ns ‖ 头 4 MiB ‖ 尾 4 MiB)`。一次引用只读 8 MiB，毫秒级完成，足以发现替换、截断与改动。
-- **内容哈希** = 全文件 sha256，在首次顺序解码时顺带算出（解码本来就要读完整份文件），随该阶段加入 `video` 表。此后同一内容换路径、改名，都能凭哈希命中已有产物。
-- **复用键** = `content_hash + stage + model_id + params_hash`。`content_hash` 为空时退回指纹，并在检查点记录里标注"可能重复计算"。
+- **转录的缓存键** = `fingerprint + model + url + asr_chunk_seconds`，取 sha256 前 16 位存入 `transcript.cache_key`。任一项变化就重建整份转录，不把两次结果拼在一起；密钥不参与——换密钥不会改变答案，秘密也不该进键。
+- **内容哈希尚未计算。** 全文件 sha256 能让同一内容换路径后命中旧产物，但要额外读一整份文件；当前引用只读 8 MiB，复制或改名会重新转写。等出现真实的重命名场景再加，加的时候是 `video` 表的一次迁移。
+- **检查点**按 `(video_id, stage, cache_key, chunk_index)` 记录：一个分片写完，另起一次运行直接跳过它。写入分段与写入检查点在同一个事务里，所以"模型调用成功但标记丢失"这类中断只会重放该片，不会留下两份。
 - 源文件变动不做自动跟踪：打开作业前重算指纹，与库里不一致时该视频的既有产物视为失效，界面提示"源文件已变化"，作业需重新开始。
 
 ## 9. 上下文策略
@@ -271,7 +310,7 @@ runtime:
 | --- | --- | --- |
 | 对话 | 用户输入、系统回复、流式输出 | 显示用法提示与配置状态 |
 | 任务 | 任务 ID、角色、动作、状态、进度、耗时 | 显示"尚未引用视频" |
-| 时间轴 | 时长刻度与区间标记（M1 起填充转录与场景） | 显示已知时长 |
+| 时间轴 | 时长、容器、转录段数与覆盖区间 | 显示"尚未引用视频" |
 | 证据 | 当前结论引用的时间戳、文本、关键帧路径 | 显示"暂无证据" |
 
 状态栏常驻：数据库文件名、三个角色使用的模型与可用状态、运行中任务数。
@@ -282,7 +321,7 @@ runtime:
 
 每一步以可验证的行为收尾，不以下一步的铺垫收尾。
 
-**M0 地基（本次）**
+**M0 地基（已实现）**
 - 引用本地 mp4：指纹、探测、入库，重复引用不产生第二条记录。
 - 作业与任务图落库并调度，状态迁移由状态机校验。
 - 工作台四区渲染，任务面板随事件实时更新。
@@ -291,8 +330,16 @@ runtime:
 
 验收：一条真实 mp4 被引用后，时长、分辨率、音轨在界面可见；改动文件后再次引用产生新记录并在对话区说明；非法迁移、坏配置、密钥泄漏各有测试；`uv run pytest` 与 `ruff check` 通过。
 
-**M1 转录**：在线 ASR 分段时间戳、分片并发、检查点、断点续跑、时间轴填充。
-验收：同一视频二次分析零转录开销；中断后重跑只补未完成分片。
+**M1 转录（已实现）**
+- 音轨提取：PyAV 解码首条音轨，重采样为 16 kHz 单声道 PCM，写 WAV；先写 `.part` 再改名，文件存在即代表完整。
+- 分片：按目标时长切分，边界吸附到前后四分之一片长内能量最低的窗口；末尾短于 1 秒的片段并入前片；切片只拷帧不重编码。
+- 转写：向配置里的完整 URL 发 multipart（`file` + `model` + `verbose_json`），把响应的分段秒转换为毫秒；超时、429、5xx 与网络错误按 1s、2s… 退避重试，其余 4xx 立即失败。
+- 检查点：每片成功后一个事务写入分段与该片标记；同一片重复写入覆盖而不追加。
+- 界面：时间轴显示段数、覆盖区间与模型；无音轨、无语音各有明确文案。
+
+验收：同一视频二次分析不再发起任何请求（`test_a_finished_transcript_costs_nothing_on_a_second_run`）；中断后重跑只补未完成分片（`test_a_crashed_run_keeps_the_chunks_it_finished`）；换模型重建而不混两份（`test_changing_the_model_rebuilds_instead_of_mixing`）；无音轨视频不产生转录且作业仍成功。真实 socket 端到端验证过：10 秒视频切 3 片、3 次请求都命中配置路径、6 段落在 0–9200ms。
+
+不做 VAD 与说话人分离：分片边界用能量最低点近似，足够避免切断句子；需要区分"谁在说"时再引入检测模型。
 
 **M2 监督者**：规则与模型双层路由、计划生成、工具调用、结论合成、阶段轨迹、质量评估。
 验收：每条结论都带可点开的时间戳证据；计划与轨迹可在界面查看。
