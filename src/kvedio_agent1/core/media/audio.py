@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import wave
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 import av
@@ -24,29 +23,21 @@ class NoAudioTrack(Exception):
     """The file carries no audio stream, so there is nothing to transcribe."""
 
 
-@dataclass(frozen=True)
-class AudioTrack:
-    """A written WAV: where it is and how long it plays."""
-
-    path: Path
-    duration_ms: int  # rounded from the samples actually decoded
-    sample_rate: int  # always SAMPLE_RATE
-
-
 def extract_audio(
     source: Path,
     target: Path,
     *,
     expected_ms: int,
     progress: Callable[[float], None] | None = None,
-) -> AudioTrack:
+) -> int:
     """Decode the first audio stream and write it as a mono 16 kHz WAV.
 
     ``expected_ms`` is the container's declared length and is used only to turn
-    decoded samples into a fraction; the returned duration comes from the samples
-    themselves, so a wrong declaration cannot shift the timeline. ``progress``
-    receives at most a hundred fractions. The file appears at ``target`` only when
-    complete: an interrupted write stays at a temporary name.
+    decoded samples into a fraction. The return value is the length of the audio
+    actually written, in milliseconds, measured from the samples: a caller that
+    compares it with the declaration learns whether the decode was whole.
+    ``progress`` receives at most a hundred fractions. The file appears at
+    ``target`` only when complete: an interrupted write stays at a temporary name.
     """
     partial = target.with_name(target.name + ".part")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -79,8 +70,4 @@ def extract_audio(
         partial.unlink(missing_ok=True)
         raise
     os.replace(partial, target)
-    return AudioTrack(
-        path=target,
-        duration_ms=round(total * 1000 / SAMPLE_RATE),
-        sample_rate=SAMPLE_RATE,
-    )
+    return round(total * 1000 / SAMPLE_RATE)

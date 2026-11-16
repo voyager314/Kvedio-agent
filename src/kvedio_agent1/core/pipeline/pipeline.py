@@ -120,7 +120,9 @@ class Pipeline:
             return
         context.report(0.0, "提取音轨")
         expected = video.media.duration_ms if video.media is not None else 0
-        extract_audio(video.path, target, expected_ms=expected, progress=context.report)
+        decoded = extract_audio(video.path, target, expected_ms=expected, progress=context.report)
+        if decoded <= 0:
+            raise ValueError("音轨没有可用的采样")
         context.report(1.0)
 
     def _transcribe(self, context: TaskContext) -> None:

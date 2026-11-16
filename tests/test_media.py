@@ -16,13 +16,12 @@ def test_audio_is_extracted_to_a_sixteen_kilohertz_mono_wav(sample_video, tmp_pa
     target = tmp_path / "audio.wav"
     fractions: list[float] = []
 
-    track = extract_audio(
+    track_ms = extract_audio(
         sample_video, target, expected_ms=1_000, progress=fractions.append
     )
 
     assert target.exists()
-    assert track.sample_rate == 16_000
-    assert track.duration_ms == pytest.approx(1_000, abs=60)
+    assert track_ms == pytest.approx(1_000, abs=60)
     with wave.open(str(target), "rb") as written:
         assert written.getnchannels() == 1
         assert written.getsampwidth() == 2
