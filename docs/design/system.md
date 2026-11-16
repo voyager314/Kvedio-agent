@@ -250,6 +250,33 @@ CREATE TABLE scene_run (
 );
 ```
 
+事件是一整份读法，不是可以续写的碎片：一次调用给出全部事件，写入时整体替换；`event_run` 只记录"这一版事件是从哪一版场景来的"。引用则多一列 `kind`：同一时刻既有台词、又有画面时引用落在台词上，只有画面时才落在场景描述上。
+
+```sql
+CREATE TABLE event (
+  id         INTEGER PRIMARY KEY,
+  video_id   INTEGER NOT NULL REFERENCES video(id),
+  cache_key  TEXT    NOT NULL,          -- 场景键 + 对话模型
+  position   INTEGER NOT NULL,
+  start_ms   INTEGER NOT NULL,
+  end_ms     INTEGER NOT NULL,
+  title      TEXT    NOT NULL,
+  summary    TEXT    NOT NULL,
+  model      TEXT    NOT NULL,
+  created_at TEXT    NOT NULL,
+  UNIQUE (video_id, cache_key, position)
+);
+
+CREATE TABLE event_run (
+  video_id     INTEGER PRIMARY KEY REFERENCES video(id),
+  cache_key    TEXT    NOT NULL,
+  total        INTEGER NOT NULL,
+  completed_at TEXT    NOT NULL
+);
+
+ALTER TABLE answer_citation ADD COLUMN kind TEXT NOT NULL DEFAULT 'transcript';
+```
+
 `artifact` 仍未建立：它要等视觉阶段产生独立文件，届时再随迁移加入。计划与轨迹刻意不落库：它们是本次作答的中间过程，界面上按事件显示，重放一段过期计划没有意义。
 
 ### 4.2 引用规则
@@ -258,7 +285,7 @@ CREATE TABLE scene_run (
 
 ### 4.3 迁移
 
-`PRAGMA user_version` 记录当前版本，现为 5。启动时若版本低于代码期望，按顺序执行各版本的迁移脚本；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。版本高于代码时拒绝打开：那些列没有反向迁移，继续写会静默丢数据。
+`PRAGMA user_version` 记录当前版本，现为 6。启动时若版本低于代码期望，按顺序执行各版本的迁移脚本；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。版本高于代码时拒绝打开：那些列没有反向迁移，继续写会静默丢数据。
 
 ## 5. 任务模型
 
@@ -379,9 +406,11 @@ runtime:
 2. **检索窗口**：`search` 同时跑关键词与向量两条排名，用倒序秩融合（RRF）合并——两种分数不同尺度，按值相加会让一方淹没另一方。向量来自 `segment_vector`，没有嵌入模型时退回关键词；中文整句无命中时退回 2 字窗口。
 3. **下钻**：模型可以按秒指定区间再取一段，单次最多 40 段；这一步同样消耗总预算。
 
-工具返回值是片段进入上下文的唯一入口。当前四个工具：`overview`、`search`、`scenes`、`read_range`。说话人分离与区间摘要要等说话人识别和场景切分，不在 M3。
+工具返回值是片段进入上下文的唯一入口。当前五个工具：`overview`、`search`、`scenes`、`events`、`read_range`。说话人分离与区间摘要要等说话人识别和场景切分，不在 M3。
 
-覆盖图的摘要只作导航：它出现在 `overview` 结果里时标为 `(map)`，引用校验只认 `verbatim` 的片段，所以结论不会落在"摘要说"这种无人说过的话上。
+覆盖图的摘要只作导航：它出现在 `overview` 结果里时标为 `(map)`，引用校验不接受它，所以结论不会落在"摘要说"这种无人说过的话上。
+
+跨模态对齐按时间做，不做语义匹配：事件行由「事件标题 + 覆盖的场景描述 + 同期声」组成，`events` 工具在读取时把三者按区间相交拼起来。对齐结果不落库——它随时可由场景与转录重算，存下来只会多一份会过期的副本。
 
 计划由模型给出，最多 4 步；计划不可解析时退回固定两步（overview + 用问题检索），并在轨迹里说明。没有"反思循环"：一次计划、一次作答，引用不合格时只允许一次纠正重试。
 
@@ -456,10 +485,12 @@ runtime:
 - 场景边界：每秒取一帧，算 32×32 灰阶签名，相邻签名差异超过阈值即切；过短的场景（默认 2 秒）与相邻场景合并；一场戏最多 80 个，超了就按顺序折叠邻居。只做 seek 不整段解码，一小时录像约几百次 seek。
 - 抽帧：取场景中点，缩到 512 宽存 JPEG，放在 `workspace/video_N/scenes/`；描述所依据的那一帧始终留在磁盘上，供人回看。
 - 帧描述：视觉模型（`video` 角色）看图写一到两句，提示词里附上该场景的同期声，要求引用屏幕上的文字、不猜测画外内容。按场景逐条写入，中断后从缺的那场继续。
-- 证据：场景描述作为 `label="scene"` 的证据进入上下文；它与地图行一样带标记，但含义不同——地图行是"摘要"，场景行是"观察"。目前引用只锚定转录原文，**场景引用**（让结论直接指向画面）需要给 `answer_citation` 加 `kind`，与事件抽取一起做。
-- 未配置 `video` 角色的密钥时整个阶段不存在，作业照常完成，只是没有画面证据。
+- 事件：场景描述交给对话模型归并成带标题与区间的事件（一次调用、整体替换），区间越界会被夹到录像长度内，重叠会被合并；回复不可用时按每 5 场分组兜底，不让作业因为"编辑没写好"而失败。
+- 跨模态对齐：`events` 工具在读取时把事件、覆盖的场景、同期声按时间拼成一行（画面 + 同期声），不落库。
+- 证据与引用：场景行是"观察"（`label="scene"`），事件行是"归并"（`label="event"`）；引用接受转录与场景，同一时刻优先台词，只有画面时 `kind="scene"`，界面显示"画面 00:04"。
+- 未配置 `video` 角色的密钥时视觉与事件阶段都不存在，作业照常完成，只是没有画面证据。
 
-待做：事件抽取（把若干场景归并成事件并命名）、跨模态对齐（事件行同时给出画面与同期声）、场景引用。
+验收：两场双色录像切出 2 场、归并成 2 个事件；让答案引用一段时间只有画面、没有台词（`[00:04]`），引用落库为 `kind="scene"`、`quote` 是场景描述（`test_a_scene_line_can_be_cited_when_nobody_was_talking`）。同一时刻同时有台词与画面时，引用落在台词上（`test_speech_wins_over_the_picture_at_the_same_moment`）。
 
 **M4 视觉**：场景边界、抽帧策略、帧描述、事件抽取、跨模态对齐。
 验收：画面类问题给出时间戳与关键帧。
