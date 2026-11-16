@@ -67,10 +67,10 @@
 | `core/pipeline/` | 把一次请求翻译成任务图并驱动阶段推进 | M0 |
 | `core/media/` | 解码级媒体处理：探测、音轨提取、抽帧、场景边界 | M0 起，逐步补齐 |
 | `core/workspace/` | 作业目录与产物布局、检查点键 | M1 |
-| `core/llm/` | 模型接入：OpenAI 兼容客户端、重试、用量记账 | M1 |
+| `core/llm/` | 模型接入：对话、转写、嵌入三个客户端，共用重试规则 | M1 起，M3 补齐嵌入 |
 | `core/asr/` | 转录流水线：切段、并发、合并、检查点 | M1 |
 | `core/supervisor/` | 计划生成、检索编排、结论合成、引用校验 | M2 |
-| `core/memory/` | 索引与检索：关键词、向量、证据选取 | M3 |
+| `core/memory/` | 覆盖图构建与混合检索：关键词、向量、证据选取 | M3 |
 | `core/video/` | 视觉理解：抽帧策略、帧描述、事件抽取 | M4 |
 | `interface/` | 终端界面：子命令、屏幕、面板、事件泵、输入语法 | M0 |
 | `tools/` | 暴露给监督者的工具实现，一族一模块：转录检索 | M2 |
@@ -199,6 +199,32 @@ CREATE TABLE answer_citation (
 CREATE INDEX idx_citation_answer ON answer_citation(answer_id, start_ms);
 ```
 
+一份覆盖图，一条向量。两者都用缓存键标明"由哪份转录、哪个模型产生"；读的时候不看键，因为重建时会先把旧键的行删掉。
+
+```sql
+CREATE TABLE coverage_block (
+  id         INTEGER PRIMARY KEY,
+  video_id   INTEGER NOT NULL REFERENCES video(id),
+  cache_key  TEXT    NOT NULL,          -- 转录键 + 对话模型 + 块长
+  position   INTEGER NOT NULL,
+  start_ms   INTEGER NOT NULL,
+  end_ms     INTEGER NOT NULL,
+  gist       TEXT    NOT NULL,          -- 一行摘要，可导航但不可引用
+  created_at TEXT    NOT NULL,
+  UNIQUE (video_id, cache_key, position)
+);
+
+CREATE TABLE segment_vector (
+  video_id   INTEGER NOT NULL REFERENCES video(id),
+  cache_key  TEXT    NOT NULL,          -- 转录键 + 嵌入模型
+  segment_id INTEGER NOT NULL REFERENCES transcript_segment(id),
+  start_ms   INTEGER NOT NULL,          -- 冗余，检索时不必回头排序
+  dims       INTEGER NOT NULL,
+  vector     BLOB    NOT NULL,          -- float32 小端
+  PRIMARY KEY (video_id, cache_key, segment_id)
+);
+```
+
 `artifact` 仍未建立：它要等视觉阶段产生独立文件，届时再随迁移加入。计划与轨迹刻意不落库：它们是本次作答的中间过程，界面上按事件显示，重放一段过期计划没有意义。
 
 ### 4.2 引用规则
@@ -207,7 +233,7 @@ CREATE INDEX idx_citation_answer ON answer_citation(answer_id, start_ms);
 
 ### 4.3 迁移
 
-`PRAGMA user_version` 记录当前版本，现为 3。启动时若版本低于代码期望，按顺序执行各版本的迁移脚本；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。版本高于代码时拒绝打开：那些列没有反向迁移，继续写会静默丢数据。
+`PRAGMA user_version` 记录当前版本，现为 4。启动时若版本低于代码期望，按顺序执行各版本的迁移脚本；不引入迁移框架，迁移是纯 SQL 加必要的数据搬运。版本高于代码时拒绝打开：那些列没有反向迁移，继续写会静默丢数据。
 
 ## 5. 任务模型
 
@@ -282,6 +308,10 @@ video:
   model: qwen-vl-max
   url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
   api_key: env:DASHSCOPE_API_KEY
+embedding:
+  model: text-embedding-v3
+  url: https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings
+  api_key: env:DASHSCOPE_API_KEY
 
 runtime:
   max_video_duration_seconds: 7200
@@ -290,10 +320,11 @@ runtime:
   request_timeout_seconds: 120
   asr_chunk_seconds: 300       # 单次转写请求承载的音频长度
   asr_concurrency: 2           # 同时发出的转写请求数
+  coverage_block_seconds: 180  # 覆盖图每块的时长
   workspace_dir: null          # null 表示 ~/.kvedio_agent/workspace
 ```
 
-三类角色共用一种形状：`model`、`url`、`api_key`。
+四类角色共用一种形状：`model`、`url`、`api_key`。
 
 `url` 是**完整地址**，调用时原样使用：不拼接路径、不改写末尾斜杠、不补版本段。供应商的路径各不相同（阿里云的兼容路径是 `/compatible-mode/v1/...`，有的供应商把版本放在别处），由用户照文档填写；缺少 `http(s)://` 在载入时就拒绝，因为半截地址要到第一次请求才暴露。
 
@@ -319,11 +350,13 @@ runtime:
 
 长视频的上下文问题不靠"塞更多"，靠三级收窄：
 
-1. **覆盖图**：先给模型一批均匀抽样的片段（当前上限 24 条），回答"视频里讲了什么"只需这层概览。
-2. **检索窗口**：按问题取回命中的段，每段保留起止时间与原文；一次作答的证据总预算 6000 字符，用尽时工具返回"预算不足"而不是继续塞。
+1. **覆盖图**：超过 40 段的录像，转写后按 `runtime.coverage_block_seconds`（默认 3 分钟）切块，逐块让对话模型写一行摘要存入 `coverage_block`。`overview` 先给这张图，再附 6 段原文作为可引用的锚点；短录音不建图，直接均匀抽样 24 段。
+2. **检索窗口**：`search` 同时跑关键词与向量两条排名，用倒序秩融合（RRF）合并——两种分数不同尺度，按值相加会让一方淹没另一方。向量来自 `segment_vector`，没有嵌入模型时退回关键词；中文整句无命中时退回 2 字窗口。
 3. **下钻**：模型可以按秒指定区间再取一段，单次最多 40 段；这一步同样消耗总预算。
 
-工具返回值是片段进入上下文的唯一入口。当前三个工具：`overview`（均匀抽样）、`search`（关键词，整句无命中时退回 2 字窗口）、`read_range`（按区间）。说话人分离与区间摘要要等说话人识别和场景切分，不在 M2。
+工具返回值是片段进入上下文的唯一入口。当前三个工具：`overview`、`search`、`read_range`。说话人分离与区间摘要要等说话人识别和场景切分，不在 M3。
+
+覆盖图的摘要只作导航：它出现在 `overview` 结果里时标为 `(map)`，引用校验只认 `verbatim` 的片段，所以结论不会落在"摘要说"这种无人说过的话上。
 
 计划由模型给出，最多 4 步；计划不可解析时退回固定两步（overview + 用问题检索），并在轨迹里说明。没有"反思循环"：一次计划、一次作答，引用不合格时只允许一次纠正重试。
 
@@ -339,7 +372,7 @@ runtime:
 | --- | --- | --- |
 | 对话 | 用户输入、系统回复、计划与检索轨迹 | 显示用法提示与配置状态 |
 | 任务 | 任务 ID、角色、动作、状态、进度、耗时 | 显示"尚未引用视频" |
-| 时间轴 | 时长、容器、转录段数与覆盖区间 | 显示"尚未引用视频" |
+| 时间轴 | 时长、容器、转录段数与覆盖区间、记忆规模 | 显示"尚未引用视频" |
 | 证据 | 当前结论引用的时间点与转录原文 | 显示"暂无证据" |
 
 状态栏常驻：数据库文件名、三个角色使用的模型与可用状态、运行中任务数。
@@ -382,8 +415,17 @@ runtime:
 
 验收：已转写视频追问只跑 `answer`（`test_a_second_question_reuses_every_finished_stage`）；编造时间点被拒（`test_one_repair_is_allowed_when_a_moment_was_invented`、`test_a_second_unsupported_answer_is_refused`）；检索为空时模型用提问的语言说明没有找到（`test_the_loop_says_so_when_nothing_matched`）。本地假服务同时提供转写与对话时，界面依次出现"转录完成 2 段""按计划执行 2 步""结论引用了 1 处"与证据区的一条引用。
 
-**M3 记忆与检索**：关键词索引、向量索引、覆盖图、按问题取证。
-验收：小时级视频的提问在固定证据预算内作答，并记录定位误差。
+**M3 记忆与检索（已实现）**
+- 角色：新增 `embedding`（完整 URL、模型、密钥）。未配置时检索退回关键词，其余流程照常。
+- 覆盖图：按时间窗切块，逐块写一行摘要；超过 40 段才建，短录音不付这笔钱。写入按块进行，中断后从缺的块继续。
+- 向量：每段一条 float32 向量，32 段一批写入；换嵌入模型或换转录键即整体重建（旧键先行删除，不会两份并存）。
+- 混合检索：关键词与余弦各自排名，RRF 合并去重；只有一个排名时按原序截断。
+- 任务图：probe → audio → transcribe → memory → answer。记忆已就绪时，追问只跑 answer；转写刚更新时记忆必随之重建。
+- 界面：时间轴显示覆盖图块数与向量条数。
+
+验收：46 段的录像建图 8 块、向量 46 条，二次构建零调用（`test_a_second_build_costs_nothing`）；第二批向量中断后重跑只补一批（`test_an_interrupted_build_resumes_at_the_first_missing_batch`）；换嵌入模型后向量仍是 46 条而不是 92 条（`test_a_new_embedding_model_replaces_the_old_vectors`）；"资金"这种说法在转写里不存在时，只有向量能把它召回到预算段落（`test_hybrid_memory_finds_what_keywords_alone_miss`）。
+
+跨视频检索尚未实现：结论的引用目前属于"一条结论一个视频"，跨视频要先给 `answer_citation` 加视频归属、扩展引用格式，再谈多视频取证。这是下一个增量，不塞进本阶段。
 
 **M4 视觉**：场景边界、抽帧策略、帧描述、事件抽取、跨模态对齐。
 验收：画面类问题给出时间戳与关键帧。
