@@ -49,9 +49,6 @@
 | 包管理 | [uv](https://docs.astral.sh/uv/) | 负责同步依赖与运行入口 |
 | 容器 | Docker Engine / Docker Desktop | 仅本地跑转写服务时需要 |
 | ffmpeg | 不需要单独安装 | 解码器随 `av` 一起安装 |
-| 内存 | 16 GB 起 | 解码长视频与并发阶段同时占用 |
-| 磁盘 | 10 GB 起 | 转写权重约 3 GB，产物另计 |
-| 网络 | 可访问所选模型服务商 | 对话、视觉、嵌入三类调用走出网 |
 
 ### 运行 faster-whisper-large-v3 的主机建议
 
@@ -59,7 +56,7 @@
 
 | 项目 | 最低 | 建议 | 参考实测量级 |
 | --- | --- | --- | --- |
-| GPU | NVIDIA，显存 4 GB，驱动支持 CUDA 12 | NVIDIA 8 GB 及以上（RTX 3060 / 4060 一档） | RTX 4060 Laptop 8 GB，`int8_float16` |
+| GPU | NVIDIA，显存 4 GB，驱动支持 CUDA 12 | NVIDIA 8 GB 及以上 | RTX 4060 Laptop 8 GB，`int8_float16` |
 | 显存占用 | large-v3 量化后约 2 GB | 8 GB 可同时留出解码与系统占用 | 模型常驻不卸载 |
 | CPU | 4 核 | 8 核 | 用于音频解码与分块 |
 | 内存 | 16 GB | 32 GB | 与服务同机运行时按上限准备 |
@@ -220,9 +217,10 @@ uv run kvedio-agent1
 
 ## 项目架构
 
-### 组件与依赖（UML 类图）
+### 组件与依赖
 
-`interface` 只负责呈现与输入解析，`core` 是引擎且不反向依赖界面；所有出网调用收敛在 `core/llm` 的四个适配器里。先是编排与基础层：
+`interface` 只负责呈现与输入解析，`core` 是引擎且不反向依赖界面；所有出网调用收敛在 `core/llm` 的四个适配器里。  
+编排与基础层：
 
 ```mermaid
 classDiagram
@@ -274,7 +272,7 @@ classDiagram
     Scheduler --> EventBus : 进度事件
 ```
 
-再是阶段与它们背后的适配器：阶段持有业务规则与缓存键，适配器只认一个端点。
+阶段与它们背后的适配器：阶段持有业务规则与缓存键，适配器只认一个端点。
 
 ```mermaid
 classDiagram
@@ -423,11 +421,9 @@ Kvedio-agent/
 ├── docs/
 │   ├── assets/               README 截图
 │   └── design/               设计文档：模块职责、数据模型、状态机、并发与上下文策略
-├── temp/                     临时脚本与试验产物，不入库
 ├── docker-compose.yml        本地转写服务
 ├── pyproject.toml            依赖、入口、ruff 与 pytest 配置
-├── AGENTS.md                 仓库规则：源码分层、注释与类型约定
-└── CLAUDE.md                 指向 AGENTS.md，避免规则出现两份
+└── AGENTS.md                 仓库规则：源码分层、注释与类型约定
 ```
 
 ## 开发
