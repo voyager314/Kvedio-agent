@@ -75,7 +75,7 @@ class RuntimeLimits(BaseModel):
     max_video_duration_seconds: int = Field(default=7200, gt=0)
     retention_days: int = Field(default=30, ge=0)
     max_global_workers: int = Field(default=6, ge=1, le=64)
-    request_timeout_seconds: int = Field(default=120, gt=0)
+    request_timeout_seconds: int = Field(default=300, gt=0)
     stage_budget_floor_seconds: int = Field(default=300, ge=30, le=3600)
     stage_budget_scale: float = Field(default=1.0, gt=0.0, le=10.0)
     stage_budget_ceiling_seconds: int = Field(default=0, ge=0, le=86400)
