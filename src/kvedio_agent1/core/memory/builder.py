@@ -22,7 +22,7 @@ from ..tasks import stop_if
 
 MIN_SEGMENTS_FOR_COVERAGE = 40  # below this the raw samples already cover the whole recording
 DEFAULT_BLOCK_MS = 180_000  # three minutes of talk per map line
-VECTOR_BATCH = 32
+VECTOR_BATCH = 16  # sized under the strictest embedding endpoint's per-request ceiling
 Report = Callable[[float, str | None], None]
 
 

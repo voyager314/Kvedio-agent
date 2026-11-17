@@ -112,7 +112,7 @@ def test_building_writes_a_map_and_vectors(store):
     assert stats.blocks > 1
     assert stats.vectors == 46
     assert chat.calls == stats.blocks
-    assert embedder.calls == 2  # 46 segments in batches of 32
+    assert embedder.calls == 3  # 46 segments in batches of 16
     assert reports[-1] == pytest.approx(1.0)
     assert store.coverage(video.id)[0].gist.startswith("第 1 块")
     assert len(store.vectorised(video.id)) == 46
@@ -146,13 +146,13 @@ def test_an_interrupted_build_resumes_at_the_first_missing_batch(store):
         MemoryBuilder(store, None, Breaking(), model="chat", block_ms=60_000).build(
             video, lambda fraction, message: None
         )
-    assert len(store.vectorised(video.id)) == 32
+    assert len(store.vectorised(video.id)) == 16
 
     resumed = FakeEmbedder()
     MemoryBuilder(store, None, resumed, model="chat", block_ms=60_000).build(
         video, lambda fraction, message: None
     )
-    assert resumed.calls == 1  # only the missing batch is paid for
+    assert resumed.calls == 2  # only the missing batches are paid for
     assert len(store.vectorised(video.id)) == 46
 
 
@@ -170,7 +170,7 @@ def test_a_new_embedding_model_replaces_the_old_vectors(store):
         video, lambda fraction, message: None
     )
 
-    assert other.calls == 2
+    assert other.calls == 3
     assert len(store.vectorised(video.id)) == 46  # not 92
 
 
