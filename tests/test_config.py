@@ -33,13 +33,13 @@ def test_first_load_creates_the_packaged_template(home):
     loaded = load_or_create()
     assert loaded.created is True
     assert loaded.path == home / "config.yml"
-    assert loaded.config.for_role(Role.ASR).model == "qwen3-asr-flash"
+    assert loaded.config.for_role(Role.ASR).model == "Systran/faster-whisper-large-v3"
     assert loaded.config.for_role(Role.VIDEO).url.endswith("/chat/completions")
     assert loaded.config.for_role(Role.EMBEDDING).model == "text-embedding-v3"
-    assert loaded.config.for_role(Role.EMBEDDING).model == "text-embedding-v3"
     assert loaded.config.runtime.max_global_workers == 6
+    assert loaded.config.runtime.request_timeout_seconds == 600
     assert loaded.config.runtime.asr_chunk_seconds == 300
-    assert loaded.config.runtime.asr_concurrency == 2
+    assert loaded.config.runtime.asr_concurrency == 1
     assert loaded.config.runtime.coverage_block_seconds == 180
     assert loaded.config.runtime.stage_budget_floor_seconds == 300
     assert loaded.config.runtime.stage_budget_scale == 1.0

@@ -18,10 +18,11 @@ supervisor:
   url: https://api.deepseek.com/v1/chat/completions
   api_key: env:DEEPSEEK_API_KEY
 
+# 默认本地docker起fast-whisper，用户可替换兼容openai收发协议的其它供应商
 asr:
-  model: qwen3-asr-flash
-  url: https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions
-  api_key: env:DASHSCOPE_API_KEY
+  model: Systran/faster-whisper-large-v3
+  url: http://127.0.0.1:8000/v1/audio/transcriptions
+  api_key: local
 
 video:
   model: qwen-vl-max
@@ -41,7 +42,7 @@ runtime:
   # 同时运行的任务数上限。
   max_global_workers: 6
   # 单次上游调用的超时，单位秒。
-  request_timeout_seconds: 120
+  request_timeout_seconds: 600
   # 单个阶段的时间预算下限，单位秒；预算按媒体时长推导，不足此值时取此值。
   # 内置倍率：探测 0.05、音轨 0.5、转写 1.5、记忆 0.5、场景 1.5、事件 0.5；
   # 作答按请求超时的 6 倍，初步结论按 3 倍。
@@ -53,7 +54,7 @@ runtime:
   # 单次转写请求承载的音频长度，单位秒。
   asr_chunk_seconds: 300
   # 同时发出的转写请求数。
-  asr_concurrency: 2
+  asr_concurrency: 1
   # 覆盖图每一块覆盖的时长，单位秒。
   coverage_block_seconds: 180
   # 固定机位没有剪辑点，超过这个时长的镜头等分后再描述。
