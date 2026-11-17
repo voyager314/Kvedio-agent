@@ -89,6 +89,9 @@ first, then the tree.
 
 Only a tool's requirement puts a file at the repository root — the build manifest,
 the lock file, the readme, the license, the agent instructions, the ignore file.
+`docker-compose.yml` belongs there for the same reason: `docker compose up` reads
+it from the working directory, so a copy kept elsewhere costs a path argument on
+every run.
 A file the work produces goes to `docs/` when it outlives the task and to `temp/`
 when it does not. Nothing is created at the root "for now".
 

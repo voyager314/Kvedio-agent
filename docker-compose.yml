@@ -1,0 +1,64 @@
+# 本地语音转写服务：speaches 封装的 faster-whisper large-v3，暴露 OpenAI 兼容的转写接口。
+#
+# 对应 ~/.kvedio_agent/config.yml 的 asr 角色：
+#   url      http://127.0.0.1:8000/v1/audio/transcriptions
+#   model    Systran/faster-whisper-large-v3
+#   api_key  与下方 API_KEY 一致
+#
+# 启动：docker compose up -d
+#
+# 首次启动只创建缓存目录，权重需显式下载（约 3GB），随后载入显存：
+#   curl -X POST -H "Authorization: Bearer local" \
+#     http://127.0.0.1:8000/v1/models/Systran/faster-whisper-large-v3
+#   curl -X POST -H "Authorization: Bearer local" \
+#     http://127.0.0.1:8000/api/ps/Systran/faster-whisper-large-v3
+
+services:
+  asr:
+    # 固定 digest：latest-cuda 是滚动标签，换一次快照就可能换掉配置字段。
+    image: ghcr.io/speaches-ai/speaches@sha256:6ec12ebf890a17e0d4b242a8ba9e0eb1fb836e60e8a3c857aea9838d541579ac
+    container_name: speaches
+    restart: unless-stopped
+    ports:
+      # 只绑回环地址：接口只有一个共享口令，不面向局域网开放。
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - hf-hub-cache:/home/ubuntu/.cache/huggingface/hub
+    environment:
+      # 转写接口的共享口令，必须与 config.yml 的 asr.api_key 写成同一个值。
+      # 留空则接口完全公开，只在确信没有其它进程可达 8000 时才有意义。
+      API_KEY: ${API_KEY:-local}
+      # 显存 8GB 时 large-v3 以 int8 常驻。
+      WHISPER__INFERENCE_DEVICE: cuda
+      WHISPER__COMPUTE_TYPE: int8_float16
+      # 模型闲置卸载的秒数；-1 表示常驻显存，避免每个分块前重新加载。
+      WHISPER__TTL: "-1"
+      ENABLE_UI: "false"
+      # 权重下载源。镜像站对 resolve 路径返回 308 且不带 X-Linked-ETag 与
+      # X-Linked-Size，huggingface_hub 0.25.1 会判为 FileMetadataError，故默认直连官方源。
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+    healthcheck:
+      # 健康检查本身也过鉴权，口令从容器自身的环境变量取，不在命令行里出现。
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import os,urllib.request as u;
+          r=u.Request('http://localhost:8000/health',
+          headers={'Authorization':'Bearer '+os.environ.get('API_KEY','')});
+          u.urlopen(r,timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  # 固定卷名：compose 默认会加项目名前缀，那样会另建一个空卷，权重要重新下载。
+  hf-hub-cache:
+    name: hf-hub-cache
