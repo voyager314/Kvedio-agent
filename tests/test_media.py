@@ -1,6 +1,8 @@
 import os
 import wave
 
+import av
+import numpy as np
 import pytest
 
 from kvedio_agent1.core.media import (
@@ -8,6 +10,7 @@ from kvedio_agent1.core.media import (
     ProbeError,
     extract_audio,
     identify,
+    needs_level_fix,
     probe,
 )
 
@@ -27,6 +30,68 @@ def test_audio_is_extracted_to_a_sixteen_kilohertz_mono_wav(sample_video, tmp_pa
         assert written.getsampwidth() == 2
         assert written.getframerate() == 16_000
     assert fractions and fractions == sorted(fractions)
+
+
+def test_a_quiet_track_is_lifted_to_a_usable_level(tmp_path):
+    """A recording made from across a room must not reach the recogniser tens of decibels down."""
+    source = _tone_video(tmp_path, amplitude=1_200)
+    target = tmp_path / "audio.wav"
+
+    extract_audio(source, target, expected_ms=1_000)
+
+    assert 24_000 < _peak(target) < 32_000
+    assert needs_level_fix(target) is False
+
+
+def test_a_loud_track_keeps_its_level(tmp_path):
+    """A track already at a usable level is not touched, so its samples stay as recorded."""
+    source = _tone_video(tmp_path, amplitude=20_000)
+    target = tmp_path / "audio.wav"
+
+    extract_audio(source, target, expected_ms=1_000)
+
+    assert 12_000 < _peak(target) < 26_000
+
+
+def test_a_silent_track_is_not_amplified(tmp_path):
+    """Silence carries no words; lifting it would only raise the noise floor."""
+    source = _tone_video(tmp_path, amplitude=0)
+    target = tmp_path / "audio.wav"
+
+    extract_audio(source, target, expected_ms=1_000)
+
+    assert _peak(target) == 0
+
+
+def _tone_video(directory, *, amplitude: int):
+    """A one-second mp4 carrying a 440 Hz tone at the requested peak amplitude."""
+    target = directory / f"tone-{amplitude}.mp4"
+    container = av.open(str(target), mode="w")
+    stream = container.add_stream("aac", rate=48_000)
+    stream.layout = "stereo"
+    time = np.arange(1024 * 47, dtype=np.float32) / 48_000
+    tone = (amplitude * np.sin(2 * np.pi * 440 * time)).astype(np.int16)
+    for index in range(47):
+        block = tone[index * 1024 : (index + 1) * 1024]
+        frame = av.AudioFrame(format="s16", layout="stereo", samples=1024)
+        frame.sample_rate = 48_000
+        frame.pts = index * 1024
+        stereo = np.empty(1024 * 2, dtype=np.int16)
+        stereo[0::2] = block
+        stereo[1::2] = block
+        frame.planes[0].update(stereo.tobytes())
+        for packet in stream.encode(frame):
+            container.mux(packet)
+    for packet in stream.encode(None):
+        container.mux(packet)
+    container.close()
+    return target
+
+
+def _peak(path) -> int:
+    with wave.open(str(path), "rb") as handle:
+        samples = np.frombuffer(handle.readframes(handle.getnframes()), dtype=np.int16)
+    return int(np.abs(samples).max(initial=0))
 
 
 def test_an_interrupted_extraction_leaves_no_file(silent_video, tmp_path):

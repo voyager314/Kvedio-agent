@@ -35,7 +35,7 @@ from ..domain import (
     TaskRecord,
     VideoRecord,
 )
-from ..media import extract_audio, identify, probe
+from ..media import extract_audio, identify, needs_level_fix, probe
 from ..memory import MemoryBuilder
 from ..storage import Storage, StorageError
 from ..supervisor import Answering, Route
@@ -361,7 +361,8 @@ class Pipeline:
     def _needs_audio(self, video: VideoRecord) -> bool:
         if video.media is not None and video.media.audio_codec is None:
             return False
-        return not self._stages.workspace.audio(video.id).exists()
+        target = self._stages.workspace.audio(video.id)
+        return not target.exists() or needs_level_fix(target)
 
     def _needs_memory(self, video: VideoRecord, *, after_transcript: bool) -> bool:
         builder = self._stages.memory
@@ -422,8 +423,11 @@ class Pipeline:
     def _audio(self, context: TaskContext) -> None:
         """Prepare the audio file once per video.
 
-        A source without an audio track is a finished stage, not a failure: there
-        is nothing to transcribe, and the answer stage will say so.
+        A file left by an earlier run is reused only when its level is already
+        usable: a quiet one was decoded before the level was raised and would cost
+        the transcript again. A source without an audio track is a finished stage,
+        not a failure: there is nothing to transcribe, and the answer stage will
+        say so.
         """
         context.check()
         video = self._video(context)
@@ -432,7 +436,7 @@ class Pipeline:
             context.report(1.0)
             return
         target = self._stages.workspace.audio(video.id)
-        if target.exists():
+        if target.exists() and not needs_level_fix(target):
             context.report(1.0, "复用已有音轨")
             return
         context.report(0.0, "提取音轨")

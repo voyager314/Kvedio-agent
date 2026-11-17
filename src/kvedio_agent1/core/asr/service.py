@@ -15,6 +15,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from ..domain import Chunk, Segment, Usage, UsageKind, VideoRecord
+from ..media import AUDIO_PROFILE
 from ..storage import Storage
 from ..tasks import stop_if
 from ..workspace import Workspace
@@ -146,10 +147,16 @@ class AsrStage:
         return segments
 
     def _cache_key(self, video: VideoRecord) -> str:
-        """Identity of the transcript: which bytes, which model, which address, which slice length.
+        """Identity of the transcript: which bytes, which model, which address, which audio.
 
         The credential is deliberately absent: rotating a key does not change what
-        the model would answer, and a secret has no business in a stored key.
+        the model would answer, and a secret has no business in a stored key. The
+        audio profile is present because the samples handed to the model change
+        when extraction changes, and a transcript made from different samples is a
+        different transcript.
         """
-        material = f"{video.fingerprint}|{self._model}|{self._address}|{self._chunk_ms}"
+        material = (
+            f"{video.fingerprint}|{self._model}|{self._address}"
+            f"|{self._chunk_ms}|{AUDIO_PROFILE}"
+        )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
