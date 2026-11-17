@@ -378,7 +378,7 @@ class Workbench(App[None]):
         """Build the router's view of the request from what the store already holds."""
         if video is None:
             return Request(question)
-        transcript = self._store.transcript(video.id)
+        transcript = self._pipeline.transcript(video)
         return Request(
             question,
             video=video,
@@ -621,6 +621,8 @@ class Workbench(App[None]):
         transcript = self._store.transcript(video.id)
         if transcript is None:
             return "转录：尚无"
+        if self._pipeline.transcript(video) is None:
+            return "转录：与当前语音配置不符，需重新分析"
         if not transcript.ready:
             return "转录：进行中"
         if transcript.segment_count == 0:

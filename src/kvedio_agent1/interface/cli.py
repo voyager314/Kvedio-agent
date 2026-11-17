@@ -71,17 +71,18 @@ def _workbench() -> int:
         )
         chat = _chat(loaded.config, store.record_usage)
         embedder = _embedder(loaded.config, store.record_usage)
+        asr = _asr_stage(loaded.config, store, workspace, store.record_usage)
         stages = Stages(
             runtime=loaded.config.runtime,
             workspace=workspace,
-            asr=_asr_stage(loaded.config, store, workspace, store.record_usage),
+            asr=asr,
             memory=_memory_stage(loaded.config, store, chat, embedder),
             vision=_vision_stage(loaded.config, store, workspace, store.record_usage),
             events=_events_stage(loaded.config, store, chat),
-            answering=_answering_stage(loaded.config, store, bus, chat, embedder),
+            answering=_answering_stage(loaded.config, store, bus, chat, embedder, asr),
         )
         router = Router(chat)
-        chatting = Chatting(store, chat, embedder) if chat is not None else None
+        chatting = Chatting(store, chat, embedder, asr) if chat is not None else None
         Workbench(
             loaded,
             store,
@@ -185,15 +186,18 @@ def _answering_stage(
     bus: EventBus,
     chat: Chat | None,
     embedder: Embedder | None,
+    asr: AsrStage | None = None,
 ) -> Answering | None:
     """The supervisor, or ``None`` when no conversation model can call out.
 
     A job then fails at the answer step naming the missing model, which is more
-    honest than returning a transcript that nobody was asked to read.
+    honest than returning a transcript that nobody was asked to read. The speech
+    stage travels along so the answer knows which transcripts its own
+    configuration would produce.
     """
     if chat is None or config.supervisor is None:
         return None
-    return Answering(store, bus, chat, config.supervisor.model, embedder)
+    return Answering(store, bus, chat, config.supervisor.model, embedder, asr)
 
 
 def _asr_stage(

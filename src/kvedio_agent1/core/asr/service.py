@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from ..domain import Chunk, Segment, Usage, UsageKind, VideoRecord
+from ..domain import Chunk, Segment, Transcript, Usage, UsageKind, VideoRecord
 from ..media import AUDIO_PROFILE
 from ..storage import Storage
 from ..tasks import stop_if
@@ -29,10 +29,11 @@ Report = Callable[[float, str | None], None]
 class AsrStage:
     """Produces a video's transcript, reusing whatever a previous run finished.
 
-    Cache identity is the video fingerprint plus the model, the address and the
-    chunk length: a change in any of them starts a new transcript instead of
-    mixing segments produced under different conditions. A second run over
-    unchanged inputs costs no model call at all.
+    Cache identity is the video fingerprint plus the model, the address, the
+    chunk length and the audio profile: a change in any of them starts a new
+    transcript instead of mixing segments produced under different conditions. A
+    second run over unchanged inputs costs no model call at all, and the store's
+    current transcript is only offered to readers when its key still matches.
 
     Does not extract audio and does not render: the caller prepares the file and
     reads the result back from the store.
@@ -61,12 +62,22 @@ class AsrStage:
 
     def current(self, video: VideoRecord) -> bool:
         """Whether a finished transcript already exists under the key this stage would use."""
-        transcript = self._store.transcript(video.id)
-        return (
-            transcript is not None
-            and transcript.ready
-            and transcript.cache_key == self._cache_key(video)
-        )
+        transcript = self.transcript(video)
+        return transcript is not None and transcript.ready
+
+    def transcript(self, video: VideoRecord) -> Transcript | None:
+        """The stored transcript when it was produced from the inputs now configured.
+
+        ``None`` covers both a video without a transcript and one whose stored
+        words came from another model, address, chunk length or audio profile.
+        The rows stay in the store either way; they are simply not the transcript
+        this configuration would produce, so a reader that cites them would point
+        at a decode the recording no longer matches.
+        """
+        stored = self._store.transcript(video.id)
+        if stored is None or stored.cache_key != self._cache_key(video):
+            return None
+        return stored
 
     def run(
         self, video: VideoRecord, report: Report, *, cancelled: Callable[[], bool] | None = None
@@ -160,3 +171,18 @@ class AsrStage:
             f"|{self._chunk_ms}|{AUDIO_PROFILE}"
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def citable_transcript(
+    store: Storage, asr: AsrStage | None, video: VideoRecord
+) -> Transcript | None:
+    """The stored transcript a reader may cite, or ``None`` when there is none.
+
+    A transcript written under other inputs is not citable: its words describe a
+    decode the current configuration would not make, so a time taken from it
+    points at the wrong moment. With no speech role configured there is no other
+    transcript to be had, and whatever the store holds is returned as it stands.
+    """
+    if asr is None:
+        return store.transcript(video.id)
+    return asr.transcript(video)

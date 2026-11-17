@@ -14,7 +14,8 @@ from pathlib import Path
 
 from ...tools import TOOLS, Evidence, Tool, ToolBox
 from .. import prompts
-from ..domain import VideoRecord
+from ..asr import AsrStage, citable_transcript
+from ..domain import Transcript, VideoRecord
 from ..llm import Chat, Embedder, Message
 from ..memory import VideoMemory
 from ..storage import Storage
@@ -39,10 +40,16 @@ class Chatting:
         store: Storage,
         chat: Chat,
         embedder: Embedder | None = None,
+        asr: AsrStage | None = None,
     ) -> None:
         self._store = store
         self._chat = chat
         self._embedder = embedder
+        self._asr = asr
+
+    def _transcript(self, video: VideoRecord) -> Transcript | None:
+        """The transcript a reader may cite, given the speech role in hand."""
+        return citable_transcript(self._store, self._asr, video)
 
     def answer(
         self,
@@ -79,7 +86,7 @@ class Chatting:
         """
         if video is None:
             return (), ("没有在屏的视频。",)
-        tools = _available(video, self._store)
+        tools = _available(video, self._store, self._transcript(video))
         if not tools:
             return (), ("该视频还没有可用的转录或场景描述。",)
         toolbox = ToolBox(
@@ -99,10 +106,11 @@ class Chatting:
         return tuple(collected[key] for key in sorted(collected)), tuple(notes)
 
 
-def _available(video: VideoRecord, store: Storage) -> tuple[Tool, ...]:
+def _available(
+    video: VideoRecord, store: Storage, transcript: Transcript | None
+) -> tuple[Tool, ...]:
     """The tools whose backing data exists for this video, in catalogue order."""
     names: set[str] = set()
-    transcript = store.transcript(video.id)
     if transcript is not None and transcript.ready and transcript.segment_count > 0:
         names.update(("overview", "search", "read_range"))
     scenes = store.scenes(video.id)

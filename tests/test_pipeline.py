@@ -9,6 +9,7 @@ import kvedio_agent1.core.pipeline.pipeline as pipeline_module
 from kvedio_agent1.core.asr import AsrStage
 from kvedio_agent1.core.config.schema import RuntimeLimits
 from kvedio_agent1.core.domain import (
+    Chunk,
     DependencyMode,
     Event,
     EventKind,
@@ -198,6 +199,45 @@ def test_a_second_question_reuses_every_finished_stage(store, workspace, answere
     assert [task.id for task in store.tasks_for_job(second.id)] == ["answer"]
     assert finished.status is JobStatus.SUCCEEDED
     assert store.answer(second.id) is not None
+
+
+def test_a_transcript_from_other_inputs_is_not_citable(store, workspace, answerer):
+    pipeline, _ = build(store, workspace, answerer)
+    video = store.register_video(
+        Path("other.mp4"), size_bytes=1, mtime_ns=1, fingerprint="fp-other-inputs"
+    )
+    transcript = store.open_transcript(video.id, "key-built-elsewhere", "asr", "transcribe")
+    store.save_chunk(
+        transcript.id,
+        video.id,
+        "transcribe",
+        "key-built-elsewhere",
+        Chunk(index=0, start_ms=0, end_ms=1_000),
+        [Segment(start_ms=0, end_ms=1_000, text="旧解码")],
+    )
+    store.finish_transcript(transcript.id)
+
+    assert store.transcript(video.id) is not None
+    assert pipeline.transcript(video) is None
+
+
+def test_without_a_speech_role_a_stored_transcript_stays_citable(store, workspace, answerer):
+    pipeline, _ = build(store, workspace, answerer, transcribe=None)
+    video = store.register_video(
+        Path("kept.mp4"), size_bytes=1, mtime_ns=1, fingerprint="fp-kept"
+    )
+    transcript = store.open_transcript(video.id, "key-built-elsewhere", "asr", "transcribe")
+    store.save_chunk(
+        transcript.id,
+        video.id,
+        "transcribe",
+        "key-built-elsewhere",
+        Chunk(index=0, start_ms=0, end_ms=1_000),
+        [Segment(start_ms=0, end_ms=1_000, text="旧解码")],
+    )
+    store.finish_transcript(transcript.id)
+
+    assert pipeline.transcript(video) is not None
 
 
 def test_a_file_that_is_not_media_fails_the_job(store, workspace, answerer, tmp_path):

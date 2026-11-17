@@ -123,6 +123,20 @@ def test_changing_the_model_rebuilds_instead_of_mixing(store, workspace, make_wa
     assert transcript.segment_count == 3
 
 
+def test_a_transcript_from_other_inputs_is_withheld(store, workspace, make_wav):
+    video = prepare(store, workspace, make_wav(PATTERN))
+    stage(store, workspace, FakeTranscriber(), model="model-a").run(video, lambda f, m: None)
+
+    same = stage(store, workspace, FakeTranscriber(), model="model-a")
+    other = stage(store, workspace, FakeTranscriber(), model="model-b")
+
+    assert same.transcript(video) is not None
+    assert same.current(video) is True
+    assert other.transcript(video) is None
+    assert other.current(video) is False
+    assert store.transcript(video.id) is not None  # the rows stay, ready to resume under their key
+
+
 def test_a_video_without_prepared_audio_is_reported(store, workspace):
     video = store.register_video(
         Path("video.mp4"), size_bytes=1, mtime_ns=1, fingerprint="fp-none"

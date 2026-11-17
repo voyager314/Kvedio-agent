@@ -6,6 +6,10 @@ store holds, offers the planner only the tools whose data exists, and writes a
 conclusion from that subset. A branch that failed narrows the answer; it does not
 cancel it, and the conclusion names the gap.
 
+A transcript produced from other speech inputs — another model, another audio
+profile — is not evidence here: it describes a decode this configuration would
+not make, so it counts as missing and the conclusion says why.
+
 A job can be answered twice: once from the branch that arrived first, and again
 after the other branch settles. The second pass receives the first conclusion and
 the new evidence, so it integrates and corrects rather than starting over. Only
@@ -18,6 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from ...tools import TOOLS, Evidence, Tool, ToolBox
+from ..asr import AsrStage, citable_transcript
 from ..domain import (
     Answer,
     Event,
@@ -25,6 +30,7 @@ from ..domain import (
     JobRecord,
     TaskRecord,
     TaskStatus,
+    Transcript,
     VideoRecord,
 )
 from ..llm import Chat, Embedder
@@ -95,12 +101,18 @@ class Answering:
         chat: Chat,
         model: str,
         embedder: Embedder | None = None,
+        asr: AsrStage | None = None,
     ) -> None:
         self._store = store
         self._bus = bus
         self._chat = chat
         self._model = model
         self._embedder = embedder
+        self._asr = asr
+
+    def _transcript(self, video: VideoRecord) -> Transcript | None:
+        """The transcript a reader may cite, given the speech role in hand."""
+        return citable_transcript(self._store, self._asr, video)
 
     def answer(
         self,
@@ -183,13 +195,15 @@ class Answering:
         """Inventory the evidence on disk and why a branch has not delivered.
 
         A source is absent either because the file has no such track, because the
-        branch is still working, or because a node of this job failed. Only the
-        last kind enters ``missing``: a running branch is disclosed as pending,
-        and a track the file does not have is a limit, not a failure.
+        branch is still working, because a node of this job failed, or because the
+        stored product came from inputs that no longer apply. Only the last two
+        enter ``missing``: a running branch is disclosed as pending, and a track
+        the file does not have is a limit, not a failure.
         """
         tasks = {task.id: task for task in self._store.tasks_for_job(job.id)}
         requested = set(job.agents)
-        transcript = self._store.transcript(video.id)
+        stored = self._store.transcript(video.id)
+        transcript = self._transcript(video)
         scenes = self._store.scenes(video.id)
         events = self._store.events(video.id)
         spoken = transcript is not None and transcript.ready and transcript.segment_count > 0
@@ -207,11 +221,15 @@ class Answering:
         if not spoken:
             if video.media.audio_codec is None:
                 limits.append("该视频没有音轨，没有文字转录")
-            elif "asr" not in requested:
-                limits.append("本次未要求文字分析")
             elif _producing(tasks, "transcribe"):
                 limits.append("文字转录仍在生成")
                 pending.append("文字转录")
+            elif stored is not None and transcript is None:
+                reason = "文字转录与当前语音配置不符，需重新分析"
+                limits.append(reason)
+                missing.append(reason)
+            elif "asr" not in requested:
+                limits.append("本次未要求文字分析")
             elif transcript is not None and transcript.ready:
                 limits.append("转录为空，没有可用台词")
             elif transcript is not None and transcript.segment_count > 0:

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from ..asr import AsrStage
+from ..asr import AsrStage, citable_transcript
 from ..config.schema import RuntimeLimits
 from ..domain import (
     Answer,
@@ -33,6 +33,7 @@ from ..domain import (
     JobRecord,
     NewTask,
     TaskRecord,
+    Transcript,
     VideoRecord,
 )
 from ..media import extract_audio, identify, needs_level_fix, probe
@@ -212,6 +213,15 @@ class Pipeline:
         signal.cancel()
         return True
 
+    def transcript(self, video: VideoRecord) -> Transcript | None:
+        """The transcript the configured speech inputs would produce, or ``None``.
+
+        A stored transcript built under another model, address, chunk length or
+        audio profile is withheld: its words describe a different decode, so an
+        answer citing them would point at moments the recording does not carry.
+        """
+        return citable_transcript(self._store, self._stages.asr, video)
+
     def _graph_for(
         self, video: VideoRecord, agents: tuple[str, ...], *, analyze_only: bool = False
     ) -> tuple[NewTask, ...]:
@@ -295,8 +305,8 @@ class Pipeline:
         return ("answer_preliminary",)
 
     def _spoken_ready(self, video: VideoRecord) -> bool:
-        """Whether a finished transcript with words is already in the store."""
-        transcript = self._store.transcript(video.id)
+        """Whether a finished transcript with words is here under the configured inputs."""
+        transcript = self.transcript(video)
         return transcript is not None and transcript.ready and transcript.segment_count > 0
 
     def _visual_ready(self, video: VideoRecord) -> bool:
@@ -372,6 +382,9 @@ class Pipeline:
             return False
         if after_transcript:
             return True  # the transcript is about to change, so the memory must follow it
+        transcript = self.transcript(video)
+        if transcript is None or not transcript.ready:
+            return False  # the map would describe words this configuration did not produce
         return not builder.current(video)
 
     def _needs_vision(self, video: VideoRecord) -> bool:
@@ -469,9 +482,9 @@ class Pipeline:
             context.report(1.0)
             return
         video = self._video(context)
-        transcript = self._store.transcript(video.id)
+        transcript = self.transcript(video)
         if transcript is None or not transcript.ready:
-            self._log(context, "没有转录，跳过记忆")
+            self._log(context, "没有可用的转录，跳过记忆")
             context.report(1.0)
             return
         context.report(0.0, "建立记忆")

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from kvedio_agent1.core.asr import AsrStage
 from kvedio_agent1.core.domain import (
     Chunk,
     DependencyMode,
@@ -21,6 +22,7 @@ from kvedio_agent1.core.supervisor import citations as rules
 from kvedio_agent1.core.supervisor.planner import MAX_STEPS, make_plan
 from kvedio_agent1.core.supervisor.synthesis import write
 from kvedio_agent1.core.tasks import EventBus
+from kvedio_agent1.core.workspace import Workspace
 from kvedio_agent1.tools import Evidence
 from kvedio_agent1.tools.transcript import TOOLS
 
@@ -289,6 +291,50 @@ def test_the_loop_refuses_to_answer_without_any_evidence(store):
         Answering(store, EventBus(), chat, "chat-model").answer(
             empty_job, lambda fraction, message: None
         )
+
+
+def _other_speech_stage(store: Storage, tmp_path: Path) -> AsrStage:
+    """A speech stage whose inputs differ from the transcript already in the store."""
+    return AsrStage(
+        store,
+        Workspace(tmp_path / "workspace"),
+        lambda audio: [],
+        model="other-asr",
+        address="https://asr.example.invalid/v1/audio/transcriptions",
+        chunk_ms=60_000,
+        concurrency=1,
+    )
+
+
+def test_a_transcript_from_other_inputs_is_named_as_a_gap(store, tmp_path):
+    video, job = prepare(store)
+    store.save_scene(video.id, "sk", 0, Scene(0, 4_000, "白板上写着预算", "/tmp/frame.jpg"))
+    chat = ScriptedChat([plan(("scenes", {})), "白板上写着预算 [00:01]。"])
+
+    answer = Answering(
+        store,
+        EventBus(),
+        chat,
+        "chat-model",
+        asr=_other_speech_stage(store, tmp_path),
+    ).answer(job, lambda fraction, message: None)
+
+    assert answer.citations[0].kind == "scene"
+    assert "文字转录与当前语音配置不符" in chat.calls[1][0].content
+    assert "证据缺失——文字转录与当前语音配置不符" in answer.text
+
+
+def test_a_transcript_from_other_inputs_alone_cannot_answer(store, tmp_path):
+    video, job = prepare(store)
+
+    with pytest.raises(ValueError, match="文字转录与当前语音配置不符"):
+        Answering(
+            store,
+            EventBus(),
+            ScriptedChat([]),
+            "chat-model",
+            asr=_other_speech_stage(store, tmp_path),
+        ).answer(job, lambda fraction, message: None)
 
 
 def test_a_picture_only_video_is_answered_and_cited_as_a_scene(store):
