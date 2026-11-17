@@ -2,10 +2,11 @@ import asyncio
 import time
 from pathlib import Path
 
+from rich.cells import cell_len
 from textual.widgets import DataTable, Input, RichLog, Static
 
 from kvedio_agent1.core.asr import AsrStage
-from kvedio_agent1.core.config import load_or_create
+from kvedio_agent1.core.config import AppConfig, Loaded, ModelBinding, load_or_create
 from kvedio_agent1.core.domain import (
     Citation,
     Event,
@@ -22,7 +23,7 @@ from kvedio_agent1.core.supervisor import Chatting
 from kvedio_agent1.core.tasks import EventBus
 from kvedio_agent1.core.workspace import Workspace
 from kvedio_agent1.interface.tui import Workbench
-from kvedio_agent1.interface.tui.app import _span
+from kvedio_agent1.interface.tui.app import _pack, _span
 
 
 def spoken(audio: Path) -> list[Segment]:
@@ -344,6 +345,90 @@ def test_a_question_asked_while_busy_waits_and_reuses_the_transcript(
 
     asyncio.run(scenario())
     store.close()
+
+def test_a_new_run_starts_with_empty_panels(home, tmp_path, sample_video, make_answerer):
+    loaded = load_or_create()
+    store = Storage(tmp_path / "kvedio.db")
+    bus = EventBus()
+    pipeline = build(
+        store, Workspace(tmp_path / "workspace"), bus, loaded, make_answerer(store)
+    )
+    earlier = store.register_video(
+        sample_video, size_bytes=1, mtime_ns=1, fingerprint="fp-earlier"
+    )
+    store.create_job(
+        earlier.id, "上一次的问题", [NewTask(id="answer", agent="supervisor", action="answer")]
+    )
+
+    async def scenario() -> None:
+        app = Workbench(loaded, store, pipeline, bus)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.query_one("#tasks", DataTable).row_count == 0
+            assert str(app.query_one("#timeline", Static).render()) == "时间轴：尚未引用视频"
+            assert str(app.query_one("#evidence", Static).render()) == "证据：暂无"
+
+    asyncio.run(scenario())
+    store.close()
+
+
+def _loaded_with_wide_names() -> Loaded:
+    """A configuration whose four model names are as long as the ones the bar must fit."""
+    covered = "https://example.invalid/v1/chat/completions"
+    return Loaded(
+        config=AppConfig(
+            supervisor=ModelBinding(model="deepseek-v4-pro", url=covered, api_key="k"),
+            asr=ModelBinding(model="Systran/faster-whisper-large-v3", url=covered, api_key="k"),
+            video=ModelBinding(model="qwen3.8-omni-flash", url=covered, api_key="k"),
+            embedding=ModelBinding(
+                model="qwen3.7-text-embedding-flash", url=covered, api_key="k"
+            ),
+        ),
+        path=Path("config.yml"),
+        created=False,
+    )
+
+
+def test_the_status_bar_keeps_a_name_that_does_not_fit_on_one_row(home, tmp_path, make_answerer):
+    loaded = _loaded_with_wide_names()
+    store = Storage(tmp_path / "kvedio.db")
+    bus = EventBus()
+    pipeline = build(
+        store, Workspace(tmp_path / "workspace"), bus, loaded, make_answerer(store)
+    )
+
+    async def scenario() -> None:
+        app = Workbench(loaded, store, pipeline, bus)
+        async with app.run_test(size=(110, 32)) as pilot:
+            await pilot.pause()
+            panel = app.query_one("#status", Static)
+            rows = str(panel.render()).split("\n")
+            assert len(rows) >= 2
+            assert all(cell_len(row) <= panel.content_size.width for row in rows)
+            assert any(row.startswith("嵌入 qwen3.7-text-embedding-flash") for row in rows)
+
+            await pilot.resize_terminal(173, 32)
+            await pilot.pause(0.3)
+            assert panel.size.height == 1
+            assert "qwen3.7-text-embedding-flash" in str(panel.render())
+
+    asyncio.run(scenario())
+    store.close()
+
+
+def test_status_items_are_packed_between_names_never_inside_one():
+    items = [
+        "库 kvedio.db",
+        "监督 deepseek-v4-pro",
+        "嵌入 qwen3.7-text-embedding-flash",
+    ]
+    assert _pack(items, 50) == [
+        "库 kvedio.db │ 监督 deepseek-v4-pro",
+        "嵌入 qwen3.7-text-embedding-flash",
+    ]
+    assert _pack(items, 200) == [" │ ".join(items)]
+    assert _pack(items, 0) == [" │ ".join(items)]
+
 
 def test_a_scene_citation_is_marked_in_the_evidence_panel():
     assert _span(Citation(start_ms=1_000, end_ms=2_000, quote="看", kind="scene")) == "画面 00:01"

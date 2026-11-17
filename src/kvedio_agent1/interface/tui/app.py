@@ -12,9 +12,11 @@ copy that can drift from it.
 from __future__ import annotations
 
 import queue
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -79,6 +81,8 @@ class FollowUp:
 
 _TASK_COLUMNS = ("task", "agent", "action", "status", "progress")
 _TASK_HEADERS = ("任务", "角色", "动作", "状态", "进度")
+
+_STATUS_SEPARATOR = " │ "
 
 _TASK_EVENTS = frozenset(
     {
@@ -149,7 +153,8 @@ class Workbench(App[None]):
         padding: 0 1;
     }
     #status {
-        height: 1;
+        height: auto;
+        min-height: 1;
         background: $panel;
         color: $text;
         padding: 0 1;
@@ -186,6 +191,7 @@ class Workbench(App[None]):
         self._queue: list[Reference | ChatRequest | FollowUp | str] = []  # waiting
         self._busy = False
         self._shown: dict[str, int] = {}  # job id -> answer revision already in the chat
+        self._status_width = 0  # panel width the status rows were packed for
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -204,16 +210,13 @@ class Workbench(App[None]):
         table = self.query_one("#tasks", DataTable)
         for column, header in zip(_TASK_COLUMNS, _TASK_HEADERS, strict=True):
             table.add_column(header, key=column)
-        self._running_jobs = {
-            job.id for job in self._store.jobs(limit=20) if job.status is JobStatus.RUNNING
-        }
         self._say("Kvedio 工作台", style="bold")
         self._say(f"配置 {self._config_path}")
         if self._created_config:
             self._say("已按模板创建配置：填入密钥或其环境变量引用后即可调用模型。", style="yellow")
         self._say(HELP, style="dim")
         self._report_configuration()
-        self._reload()
+        self._blank_panels()
         self._render_status()
         self.set_interval(0.12, self._pump)
         self.query_one("#prompt", Input).focus()
@@ -421,15 +424,27 @@ class Workbench(App[None]):
         ends mid-job. An event with nothing left to render into is dropped rather
         than raised out of the timer, where it would hide the original failure.
         """
-        while True:
-            try:
-                event = self._events.get_nowait()
-            except queue.Empty:
-                return
-            try:
+        try:
+            while True:
+                try:
+                    event = self._events.get_nowait()
+                except queue.Empty:
+                    break
                 self._apply(event)
-            except NoMatches:
-                return
+            self._fit_status()
+        except NoMatches:
+            return
+
+    def _fit_status(self) -> None:
+        """Re-pack the status rows when the terminal width changed under them.
+
+        The width is compared on every tick rather than read from a resize
+        handler, because a handler on the app runs before the panels carry the
+        new size and would pack the rows for the width they are leaving.
+        """
+        panel = self.query_one("#status", Static)
+        if panel.content_size.width != self._status_width:
+            self._render_status()
 
     def _apply(self, event: Event) -> None:
         kind = event.kind
@@ -587,11 +602,16 @@ class Workbench(App[None]):
             self._say(f"证据 {len(answer.citations)} 处：{moments}", style="dim")
         self._render_evidence()
 
-    def _reload(self) -> None:
-        """Render what the store already holds, so a restart does not look like an empty install."""
-        jobs = self._store.jobs(limit=1)
-        if jobs:
-            self._watch(jobs[0].id)
+    def _blank_panels(self) -> None:
+        """Open a run with empty panels: a stored history is not the work this run was given.
+
+        The store keeps earlier videos, their transcripts and their vectors, so a
+        referenced file resumes from them. Nothing of that history is loaded on
+        its own, otherwise a fresh run shows a job the reader never started here
+        and cannot tell finished work from work in progress.
+        """
+        if self._store.jobs(limit=1):
+            self._say("库中有先前的作业；用 @路径 重新引用视频即可继续追问。", style="dim")
         else:
             self._say("尚无视频：用 @路径 问题 引用一个本地文件。", style="dim")
         self._render_timeline()
@@ -700,12 +720,22 @@ class Workbench(App[None]):
         return "\n".join(lines)
 
     def _render_status(self) -> None:
-        parts = [f"库 {self._store.path.name}"]
+        """Name the store, the four role models and the count of running jobs.
+
+        The row is packed to the panel's width and takes a second row instead of
+        being cropped: a bar that stops at the last role hides the model behind
+        it, and a name missing that way is indistinguishable from a role whose
+        model was never configured.
+        """
+        items = [f"库 {self._store.path.name}"]
         for role in Role:
             binding = self._config.for_role(role)
-            parts.append(f"{role_label(role)} {model_label(binding, is_usable(binding))}")
-        parts.append(f"运行中 {len(self._running_jobs)}")
-        self.query_one("#status", Static).update(" │ ".join(parts))
+            items.append(f"{role_label(role)} {model_label(binding, is_usable(binding))}")
+        items.append(f"运行中 {len(self._running_jobs)}")
+        panel = self.query_one("#status", Static)
+        width = panel.content_size.width or self.size.width - 2
+        self._status_width = panel.content_size.width
+        panel.update("\n".join(_pack(items, width)))
 
     def _latest_video(self) -> VideoRecord | None:
         if self._video_id is None:
@@ -836,3 +866,28 @@ def _span(citation: Citation) -> str:
     else:
         moment = f"{format_moment(citation.start_ms)}–{format_moment(citation.end_ms)}"
     return f"画面 {moment}" if citation.kind == "scene" else moment
+
+
+def _pack(items: Sequence[str], width: int) -> list[str]:
+    """Lay status items out in rows of at most ``width`` terminal cells.
+
+    Items are joined whole and a row breaks between two of them, never inside
+    one: half a model name reads as a different model, and a role left at the
+    end of a row would appear to carry no model at all. ``width`` at or below
+    zero means the panel has not been measured yet, so the items stay on one row
+    for the layout to size.
+    """
+    if width <= 0:
+        return [_STATUS_SEPARATOR.join(items)]
+    rows: list[str] = []
+    row = ""
+    for item in items:
+        candidate = f"{row}{_STATUS_SEPARATOR}{item}" if row else item
+        if row and cell_len(candidate) > width:
+            rows.append(row)
+            row = item
+        else:
+            row = candidate
+    if row:
+        rows.append(row)
+    return rows
