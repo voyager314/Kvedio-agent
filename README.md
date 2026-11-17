@@ -435,8 +435,6 @@ uv run ruff check .
 uv run ruff format .
 ```
 
-`AGENTS.md` 是仓库规则的唯一副本：新增包要先改它的包表，注释只写代码无法自述的意图，类型承载结构，定义必须被使用。
-
 ## License
 
 MIT，见 [LICENSE](LICENSE)。
